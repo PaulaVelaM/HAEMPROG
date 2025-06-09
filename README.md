@@ -6,5 +6,5 @@ The aim of this project was to identify and validate stable housekeeping genes (
 
 ## Repository structure
 - `scripts/`: All analysis scripts, including differential expression, gene stability selection, and PCA.
-- `data/`: Placeholder folder (no raw data uploaded). You can access the dataset from GEO: [GSE233478](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE233478)
+- `data/`:  Contains scripts used to download the raw RNA-seq data. You can access the dataset from GEO: [GSE233478](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE233478)
 - `README.md`: You are here.
