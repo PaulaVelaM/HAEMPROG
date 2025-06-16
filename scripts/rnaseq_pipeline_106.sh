@@ -17,8 +17,6 @@ NXF_VER=23.10.0
 
 # Set the singularity cache directory so the containers are not re-downloaded every time
 export NXF_SINGULARITY_CACHEDIR=/mnt/beegfs/mmerono/singularity_cache
-#export TMPDIR=/mnt/beegfs/pmoreno/rsem_tmp
-
 
 # Run the nf-core/rnaseq pipeline with Nextflow
 # Use STAR for alignment and RSEM for quantification
