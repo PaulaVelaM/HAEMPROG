@@ -34,11 +34,6 @@ library(RUVSeq)
 library("org.Hs.eg.db", character.only = TRUE) # Genome wide annotation for Human
 ```
 
-```{r set_directory, include = FALSE}
-# Set the working directory
-# setwd("...") change 
-```
-
 ```{r}
 sessionInfo()
 ```
