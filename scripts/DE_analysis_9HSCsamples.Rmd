@@ -1,0 +1,814 @@
+---
+title: "Differential Expression Analysis HSC"
+author: "Paula Vela Moreno"
+date: "2025-02-25"
+output: html_document
+---
+
+############################################################
+#                                                          #
+# Diferential expression analysis on a subset of 9 HSC     #
+# samples to test strategy for selecting stable            #
+# housekeeping genes.                                      #
+# Data: fetal liver, umbilical cord, and adult bone marrow #
+# (3 of each).                                             #
+#                                                          #
+############################################################
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r load_libraries, include=FALSE}
+# Load the necessary libraries
+library(DESeq2) 
+library(ineq)
+library(DescTools)
+library(ggplot2) 
+library(tidyr)
+library(dplyr)
+library(pheatmap) 
+library(clusterProfiler) 
+library(RUVSeq)
+library("org.Hs.eg.db", character.only = TRUE) # Genome wide annotation for Human
+```
+
+```{r set_directory, include = FALSE}
+# Set the working directory
+setwd("../Documents/BDBI/INTERNSHIP/")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+
+## 1. Read the count matrix and the metadata
+```{r read_counts_metadata}
+# Read the count matrix (genes are rows, samples are columns)
+counts <- read.csv("merged_counts.tsv", header = TRUE, row.names = 1, check.names = FALSE)
+counts <- round(counts) # Even there are no decimal numbers do round(), because it will not work 
+
+# Read the metadata
+m <- read.csv("metadata.csv", header=TRUE, row.names = 1)
+
+m$Category <- c("Fetus", "Newborn", "Fetus", "Adult", "Adult", "Newborn", "Fetus", "Newborn", "Adult") # Add a new column specifying the category
+
+# Check column names of counts and row names of metadata are equal
+colnames(counts) == rownames(m)
+
+# Ensure variables are factors
+m$Tissue <- factor(m$Tissue)
+m$Category <- factor(m$Category, levels = c("Fetus", "Newborn", "Adult"))
+```
+
+
+
+## 2. Construct the DESeqDataSet() object
+```{r create_dds, warning=FALSE, include=FALSE}
+# Combine the count matrix "counts" with the sample information "metadata"
+dds_raw <- DESeqDataSetFromMatrix(countData = counts, # raw count matrix
+                              colData = m, # metadata
+                              design = ~ Tissue) # formula to compare by tissue
+```
+
+
+
+## 3. Transformation and initial PCA 
+```{r initial_pca_plot}
+# Variance Stabilizing Transformation (VST) 
+vsd_pca <- vst(dds_raw, blind = TRUE) # vst without taking into account the tissue of origin for the calculus
+
+# Extract the data and calculate the percentage of variance explained by each PC
+pcaData <- plotPCA(vsd_pca, intgroup = c("Tissue"), returnData = TRUE)
+percentage_variation <- round(100 * attr(pcaData, "percentVar"))
+
+# Create PCA with ggplot2
+ggplot(pcaData, aes(PC1, PC2, color = Tissue)) +
+  geom_point(size = 3) +
+  labs(title = "Initial PCA", x = paste0("PC1 Var: ", percentage_variation[1], " % variance"),
+         y = paste0("PC2 Var: ", percentage_variation[2], " % variance")) +
+  scale_color_viridis_d(option = "viridis") +
+  theme_minimal()
+ggsave("Initial_PCA_9.png")
+```
+
+
+
+## 4. Pre-filtering and relevel
+```{r pre_filtering}
+replicates <- table(m$Tissue)
+minimum_replicates <- min(replicates)
+minimum_replicates
+
+# Keep genes with at least 10 counts in at least 3 samples
+smallestGroupSize <- minimum_replicates
+keep <- rowSums(counts(dds_raw) >= 10) >= smallestGroupSize
+dds_filtered <- dds_raw[keep,] 
+dds_filtered
+
+### RELEVEL
+dds_filtered$Tissue <- relevel(dds_filtered$Tissue, ref = "Umbillical Cord Blood")
+```
+
+
+
+## 5. Normalized counts to calculate CV and Gini Index
+```{r}
+dds_filtered <- estimateSizeFactors(dds_filtered)
+expr_matrix <- counts(dds_filtered, normalized = TRUE)
+```
+
+
+
+## 6. Calculate the coefficient of variation (CV)
+```{r coefficient_variation}
+# Mean expression per gene
+gene_means <- rowMeans(expr_matrix)
+
+# Dispersion of the data relative to the mean
+gene_stdev <- apply(expr_matrix, 1, sd) 
+
+# Formula to calculate CV
+cv_values <- gene_stdev/gene_means 
+```
+
+```{r density_plot_CV, warning=FALSE}
+# Dataframe for ggplot
+df_cv_values <- data.frame(Gene = names(cv_values), 
+                           CV = as.numeric(cv_values))
+
+# Take the 2nd percentile (CV value in the lowest 2%)
+cv_threshold <- quantile(df_cv_values$CV, probs = 0.02, na.rm = TRUE)
+
+# Select candidate housekeeping genes
+genes_low_CV <- cv_values[cv_values < cv_threshold] # CV values below the threshold
+genes_low_CV_names <- names(genes_low_CV) # Extract their names
+length(genes_low_CV) # 425 genes
+
+
+
+# Compute the density of the CV values
+density_cv <- density(df_cv_values$CV) # by dong this I obtain the minimum/maximum value, 1st/3rd quartile, mean, and media for x and y.
+
+# Value of 'x' in which 'y' is maximum
+max_cv <- density_cv$x[which.max(density_cv$y)] 
+
+
+
+# DENSITY PLOT
+ggplot(df_cv_values, aes(x = CV)) +
+  geom_density(fill = "blue", alpha=0.2) +
+  geom_vline(xintercept = max_cv, color = "blue", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = max_cv, y = 1.25), label = round(max_cv, 3), color = "blue", hjust = -0.3, vjust = 1) +
+  geom_vline(xintercept = cv_threshold, color = "red", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = cv_threshold, y = 1.25), label = round(cv_threshold, 3), color = "red", hjust = 1.3, vjust = 0) +
+  labs(title = "Density plot of CV values", x = "Coefficient of Variation", y = "Density") +
+  theme_minimal()
+
+ggsave("DensityPlot_CV_9.png")
+```
+
+
+
+## 7. Calculate the Gini Index
+```{r calculate_gini_index}
+# Create the Gini Index function
+gini_index <- function(expression_values){
+  if (sum(expression_values) == 0) return (NA)
+  
+  expression_values <- sort(expression_values)
+  n <- length(expression_values)
+  
+  cum_sum <- cumsum(expression_values)
+  
+  numerator <- sum((2*(1:n) - n - 1) * expression_values) # each index is multiplied by 2
+  denominator <- n * sum(expression_values) # multiply each term by the value of expression that corresponds
+  
+  gini <- numerator/denominator
+  
+  return(gini)
+}
+
+gini_scores <- apply(expr_matrix, 1, gini_index) # apply the function gene by gene (1)
+```
+
+**Alternative calculations:**
+```{r gini_index_with_ineq}
+# Gini Index can also be computed using: ineq and DescTools packages
+
+## ineq
+gini_scores_pkg <- apply(expr_matrix, 1, function(x) if (sum(x) == 0) NA else ineq(x, type = "Gini"))
+
+## DescTools
+gini_scores_desc <- apply(expr_matrix, 1, function(x) {
+  if (sum(x) == 0) NA else Gini(x)
+})
+
+# Compute correlation between the Gini scores obtained by the manual function and the ones by the packages
+cor(gini_scores, gini_scores_pkg)
+cor(gini_scores, gini_scores_desc)
+```
+
+
+
+```{r density_plot_gini}
+# Create dataframe for ggplot
+gini_results <- data.frame(Gene = names(gini_scores), 
+                           Gini_Index = gini_scores)
+
+gini_threshold <- quantile(gini_results$Gini_Index, probs = 0.02, na.rm = TRUE) # 2% >> gini value 0.1028214
+genes_low_gini <- gini_results[gini_results$Gini_Index < gini_threshold, ]
+genes_low_gini_names <- genes_low_gini$Gene
+
+
+# compute the density of the gini values
+density_gini <- density(gini_results$Gini_Index) 
+
+# value of x in which y is maximum
+m_gini <- density_gini$x[which.max(density_gini$y)] 
+
+
+## DENSITY PLOT ##
+ggplot(gini_results, aes(x = Gini_Index)) +
+  geom_density(fill = "blue", alpha=0.2) +
+  theme_minimal() +
+  geom_vline(xintercept = m_gini, color = "blue", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = m_gini, y = 1.25), label = round(m_gini, 3), color = "blue", hjust = -0.3, vjust = -12.7) +
+  geom_vline(xintercept = gini_threshold, color = "red", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = gini_threshold, y = 3.25), label = round(gini_threshold, 3), color = "red", hjust = 1.3, vjust = 0) +
+  labs(title = "Density plot of Gini values", x = "Gini Index Values", y = "Density")
+
+ggsave("DensityPlot_Gini_9.png")
+```
+
+
+**Lorenz Curve**
+```{r lorenz_curve}
+ginis_sort <- sort(gini_results$Gini_Index)
+low_ginis <- ginis_sort[1:3] # the first three
+high_ginis <- ginis_sort[21202:21204] # the last three
+
+low_ginis_name <- subset(gini_results, Gini_Index %in% low_ginis)
+high_ginis_name <- subset(gini_results, Gini_Index %in% high_ginis)
+
+genes_low_ginis <- low_ginis_name$Gene
+genes_high_ginis <- high_ginis_name$Gene
+
+
+png("Lorenz_curves_genes_9.png", width = 1200, height = 800)
+par(mfrow = c(2, 3), # 2 rows, 3 columns
+    oma = c(5, 4, 5, 4), # (bottom, left, top, right)
+    mgp = c(4, 1, 0), # (label, tick, line)
+    mar = c(7, 8, 6, 5))  # (bottom, left, top, right) (between plots of the same row)
+
+# Calculate and plot the Lorenz curve for the first 3 genes with the smallest value
+top <- for (i in genes_low_ginis) {
+  gene_expression <- expr_matrix[i,]  # Obtain the expression of the i gene
+  lorenz_curve <- Lc(gene_expression)  # Calculate the Lorenz curve
+  plot(lorenz_curve,
+   	main = paste("Gene", i),
+   	xlab = "Genes",
+   	ylab = "Expression",
+   	col = "#0072B2", lwd = 3, # lwd es el grosor
+   	cex.main = 2,
+   	cex.lab = 2,
+   	cex.axis = 2,
+   	family = "serif")
+  abline(0, 1, col = "black", lty = 2)  # Add the diagonal (perfect equality)
+}
+
+# Calculate and plot the Lorenz curve for the last 3 genes with the highest value
+down <- for (i in genes_high_ginis) {
+  gene_expression <- expr_matrix[i,]  # Obtain the expression of the i gene
+  lorenz_curve <- Lc(gene_expression)  # Calculate the Lorenz curve
+  plot(lorenz_curve,
+   	main = paste("Gene", i),
+   	xlab = "Genes", # Accumulative proportion of genes
+   	ylab = "Expression", # Accumulative proportion of expression
+   	col = "#0072B2", lwd = 3, # lwd es el grosor
+   	cex.main = 2,
+   	cex.lab = 2,
+   	cex.axis = 2,
+   	family = "serif")
+  abline(0, 1, col = "black", lty = 2)  # Add the diagonal (perfect equality)
+}
+
+mtext("Lorenz curves for genes with top 3 low and high Gini Indices", outer = TRUE, cex = 1, line = -1)
+dev.off()
+```
+
+
+
+## 8. Select candidate HKGs and check if literature HKGs are in the candidates
+```{r lit_HKG_vs_my_HKG}
+### LITERATURE HKGs ###
+# B2M: ENSG00000166710
+# ACTB: ENSG00000075624 
+# GAPDH: ENSG00000111640
+# HPRT1: ENSG00000165704
+# HMBS: ENSG00000256269
+# PPIA: ENSG00000196262
+# SDHA: ENSG00000073578
+# YWHAZ: ENSG00000164924
+# TBP: ENSG00000112592
+# RPLP0: ENSG00000089157
+# UBC: ENSG00000150991
+# GUSB: ENSG00000169919
+# PGK1: ENSG00000102144
+# RPL13A: ENSG00000142541
+
+
+hkg_lit <- c("ENSG00000166710", "ENSG00000075624", "ENSG00000111640", "ENSG00000165704", "ENSG00000256269", "ENSG00000196262", "ENSG00000073578", "ENSG00000164924", "ENSG00000112592", "ENSG00000089157", "ENSG00000150991",  "ENSG00000169919", "ENSG00000102144", "ENSG00000142541")
+
+# Check if the typical HKGs in literature are among the 425 selected by CV
+intersect(genes_low_CV_names, hkg_lit) 
+
+# Check if the typical HKGs in literature are among the 425 selected by Gini Index
+intersect(genes_low_gini_names, hkg_lit)
+```
+
+```{r}
+# Extract the expression of the literature HKGs
+exp_literature_genes <- expr_matrix[hkg_lit, ] 
+head(exp_literature_genes)
+
+# Extract the CV values of the literature HKGs
+cv_literature_genes <- cv_values[hkg_lit] 
+cv_literature_genes
+
+# Extract the Gini index values of the literature HKGs
+gini_literature_genes <- gini_results[hkg_lit, ]
+gini_literature_genes
+```
+
+
+**Extract the housekeeping genes selected in common: CV and Gini Index**
+```{r my_list_hkg}
+# Common genes selected by both metrics
+common_CV_Gini <- intersect(genes_low_CV_names, genes_low_gini_names)
+length(common_CV_Gini) # 401
+
+# Extract the expression of those candidate genes
+housekeeping_data <- expr_matrix[common_CV_Gini, ]
+
+housekeeping_cor <- cor(housekeeping_data) # Matrix of correlation of the housekeeping genes
+housekeeping_cor
+
+png("Correlation_candidate_HKGs_9.png")
+par(oma = c(2, 2, 2, 2))
+heatmap(housekeeping_cor, main = "Correlation between Housekeeping Genes") 
+dev.off()
+
+# Check if literature housekeeping genes in my candidates
+intersect(common_CV_Gini, hkg_lit) 
+
+#saveRDS(common_CV_Gini, file = "final_candidate_HKGs_9.rds")
+
+```
+
+
+
+## 9. Enrichment Analysis of the candidate HKGs
+By default:
+  pvalueCutoff = 0.05
+  qvalueCutoff = 0.2
+  
+```{r EA_candidate_hkg}
+candidate_HKGs <- readRDS("final_candidate_HKGs_9.rds")
+all_expressed_genes_9 <- rownames(expr_matrix)
+
+go_enrich_hkg_BP_9 <- enrichGO(gene = candidate_HKGs,
+                      OrgDb = org.Hs.eg.db,
+                      keyType = 'ENSEMBL',
+                      ont = "BP",
+                      universe = all_expressed_genes_9,
+                      readable = TRUE, # convert gene IDs to gene symbols
+                      pvalueCutoff = 0.15, # more relaxed
+                      qvalueCutoff = 0.2) 
+
+View(data.frame(go_enrich_hkg_BP_9))
+```
+
+
+
+```{r visualization_EA_candidate_HKG}
+# For quick insights: BARPLOT
+png("Barplot_top_BP_9.png")
+barplot(go_enrich_hkg_BP_9, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("Barplot of top Biological Processes")
+dev.off()
+
+# For relationships between terms: GO TREE
+png("Dotplot_top_BP_9.png")
+dotplot(go_enrich_hkg_BP_9, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("Dotplot of top Biological Processes")  
+dev.off()
+
+# For gene term connections: CNET PLOT
+png("Cnetplot_BP_9.png", width = 1600, height = 1200, res = 300)
+cnetplot(go_enrich_hkg_BP_9, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("Cnetplot of top Biological Processes") 
+dev.off()
+```
+
+
+
+## 10. Differential Expression Analysis
+```{r run_deseq}
+# Execute DESeq to estimate dispersion and adjust the model
+dds_no_ruv <- DESeq(dds_filtered)  
+
+res_no_ruv <- resultsNames(dds_no_ruv) 
+res_no_ruv
+```
+
+NOTE: DESeq2 does not use normalized counts. It uses the raw counts and models the normalization inside the Generalized Linear Model (GLM). Normalized counts will be useful for downstream visualization of results, but cannot be used as input to DESeq2 or any other tools that perform differential expression analysis which use the negative binomial model.
+
+**Comparison of interest**
+```{r comparisons}
+# "Fetal liver" vs "Umbilical Cord Blood"
+res_FL_vs_UC <- results(dds_no_ruv, 
+                        contrast = c("Tissue", 
+                                     "Fetal liver", 
+                                     "Umbillical Cord Blood"), # Reference
+                        independentFiltering = FALSE) 
+head(res_FL_vs_UC, 3)
+summary(res_FL_vs_UC)
+
+
+# "Adult Bone Marrow" vs "Umbilical Cord Blood"
+res_BM_vs_UC <- results(dds_no_ruv, 
+                        contrast = c("Tissue", 
+                                     "Adult Bone Marrow", 
+                                     "Umbillical Cord Blood"), # Reference
+                        independentFiltering = FALSE) 
+head(res_BM_vs_UC, 3)
+summary(res_BM_vs_UC)
+
+
+# "Fetal liver" vs "Adult Bone Marrow"
+res_FL_vs_BM <- results(dds_no_ruv, 
+                        contrast = c("Tissue", 
+                                     "Fetal liver", 
+                                     "Adult Bone Marrow"), # Reference
+                        independentFiltering = FALSE)
+head(res_FL_vs_BM, 3)
+summary(res_FL_vs_BM)
+```
+
+
+
+## 11. Remove Unwanted Variation 
+```{r remove_unwanted_variation}
+# Define control genes (the 410 HKGs selected)
+controls <- common_CV_Gini
+
+# Raw counts of the filtered genes
+counts_filtered <- counts(dds_filtered)
+
+# Metadata 
+pheno <- as.data.frame(colData(dds_filtered))
+
+# Create the object from the count matrix
+seq <- newSeqExpressionSet(counts = as.matrix(counts_filtered),
+                           phenoData = pheno)
+
+# Check the columns of pData(seq)
+head(pData(seq))
+
+# Remove unwanted variation with the control genes 
+# K is the number of unwanted variation factors to remove
+ruv_k1 <- RUVg(seq, controls, k=1)  
+ruv_k2 <- RUVg(seq, controls, k=2)
+
+# Extract W_1 and add it to the metadata
+metadata_w1 <- pData(ruv_k1)
+metadata_w1$W_1 <- metadata_w1$W_1
+
+
+metadata_w2 <- pData(ruv_k2)
+metadata_w2$W_1 <- metadata_w2$W_1
+metadata_w2$W_2 <- metadata_w2$W_2
+```
+
+
+
+## 12. Differential Expression Analysis with RUV
+```{r}
+# Create the object
+dds_ruv <- DESeqDataSetFromMatrix(countData = counts(dds_filtered), 
+                                  colData = metadata_w1, 
+                                  design = ~ W_1 + Tissue) # take into account variation coming from W_1 before evaluating the real effect of interest (Tissue)
+
+# Relevel
+dds_ruv$Tissue <- relevel(dds_ruv$Tissue, ref = "Umbillical Cord Blood")
+
+# Adjust the model with DESeq
+dds_ruv <- DESeq(dds_ruv)
+res_ruv <- results(dds_ruv)
+
+# Extract the results
+res_ruv_FL_vs_UC <- results(dds_ruv, 
+                            contrast = c("Tissue", 
+                                         "Fetal liver", 
+                                         "Umbillical Cord Blood"),
+                            independentFiltering = FALSE)
+head(res_ruv_FL_vs_UC, 3)
+summary(res_ruv_FL_vs_UC)
+
+
+res_ruv_BM_vs_UC <- results(dds_ruv, 
+                            contrast = c("Tissue", 
+                                         "Adult Bone Marrow", 
+                                         "Umbillical Cord Blood"),
+                            independentFiltering = FALSE)
+head(res_ruv_BM_vs_UC, 3)
+summary(res_ruv_BM_vs_UC)
+
+
+res_ruv_FL_vs_BM <- results(dds_ruv, 
+                            contrast = c("Tissue", 
+                                         "Fetal liver", 
+                                         "Adult Bone Marrow"),
+                            independentFiltering = FALSE)
+head(res_ruv_FL_vs_BM, 3)
+summary(res_ruv_FL_vs_BM)
+```
+
+
+
+13. Selecting significant genes
+```{r}
+### BEFORE RUV
+DE_genes_BM_vs_UC <- res_BM_vs_UC[which(res_BM_vs_UC$padj < 0.05), ]
+up_BM_vs_UC <- DE_genes_BM_vs_UC[DE_genes_BM_vs_UC$log2FoldChange > 0, ]
+down_BM_vs_UC <- DE_genes_BM_vs_UC[DE_genes_BM_vs_UC$log2FoldChange < 0, ]
+
+DE_genes_FL_vs_BM <- res_FL_vs_BM[which(res_FL_vs_BM$padj < 0.05), ]
+up_FL_vs_BM <- DE_genes_FL_vs_BM[DE_genes_FL_vs_BM$log2FoldChange > 0, ]
+down_FL_vs_BM <- DE_genes_FL_vs_BM[DE_genes_FL_vs_BM$log2FoldChange < 0, ]
+
+DE_genes_FL_vs_UC <- res_FL_vs_UC[which(res_FL_vs_UC$padj < 0.05), ]
+up_FL_vs_UC <- DE_genes_FL_vs_UC[DE_genes_FL_vs_UC$log2FoldChange > 0, ]
+down_FL_vs_UC <- DE_genes_FL_vs_UC[DE_genes_FL_vs_UC$log2FoldChange < 0, ]
+```
+
+```{r}
+### AFTER RUV
+DE_genes_BM_vs_UC_ruv <- res_ruv_BM_vs_UC[which(res_ruv_BM_vs_UC$padj < 0.05), ]
+up_BM_vs_UC_ruv <- DE_genes_BM_vs_UC_ruv[DE_genes_BM_vs_UC_ruv$log2FoldChange > 0, ]
+down_BM_vs_UC_ruv <- DE_genes_BM_vs_UC_ruv[DE_genes_BM_vs_UC_ruv$log2FoldChange < 0, ]
+
+DE_genes_FL_vs_BM_ruv <- res_ruv_FL_vs_BM[which(res_ruv_FL_vs_BM$padj < 0.05), ]
+up_FL_vs_BM_ruv <- DE_genes_FL_vs_BM_ruv[DE_genes_FL_vs_BM_ruv$log2FoldChange > 0, ]
+down_FL_vs_BM_ruv <- DE_genes_FL_vs_BM_ruv[DE_genes_FL_vs_BM_ruv$log2FoldChange < 0, ]
+
+DE_genes_FL_vs_UC_ruv <- res_ruv_FL_vs_UC[which(res_ruv_FL_vs_UC$padj < 0.05), ]
+up_FL_vs_UC_ruv <- DE_genes_FL_vs_UC_ruv[DE_genes_FL_vs_UC_ruv$log2FoldChange > 0, ]
+down_FL_vs_UC_ruv <- DE_genes_FL_vs_UC_ruv[DE_genes_FL_vs_UC_ruv$log2FoldChange < 0, ]
+```
+
+
+
+14. Enrichment analysis
+```{r}
+### Before RUV ###
+# BM vs UC
+up_genes_BM_vs_UC <- rownames(up_BM_vs_UC)
+go_up_BM_vs_UC <- enrichGO(gene = up_genes_BM_vs_UC,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_BM_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_up_BM_vs_UC)) # 63
+
+down_genes_BM_vs_UC <- rownames(down_BM_vs_UC)
+go_down_BM_vs_UC <- enrichGO(gene = down_genes_BM_vs_UC,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_BM_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_down_BM_vs_UC)) # 6
+
+
+# FL vs BM
+up_genes_FL_vs_BM <- rownames(up_FL_vs_BM)
+go_up_FL_vs_BM <- enrichGO(gene = up_genes_FL_vs_BM,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_FL_vs_BM),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_up_FL_vs_BM)) # 11
+
+down_genes_FL_vs_BM <- rownames(down_FL_vs_BM)
+go_down_FL_vs_BM <- enrichGO(gene = down_genes_FL_vs_BM,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_FL_vs_BM),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_down_FL_vs_BM)) # 517
+
+
+# FL vs UC
+up_genes_FL_vs_UC <- rownames(up_FL_vs_UC)
+go_up_FL_vs_UC <- enrichGO(gene = up_genes_FL_vs_UC,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_FL_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_up_FL_vs_UC)) # 107
+
+down_genes_FL_vs_UC <- rownames(down_FL_vs_UC)
+go_down_FL_vs_UC <- enrichGO(gene = down_genes_FL_vs_UC,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_FL_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_down_FL_vs_UC)) # 244
+```
+
+```{r}
+### After RUV ###
+# BM vs UC
+up_genes_BM_vs_UC_ruv <- rownames(up_BM_vs_UC_ruv)
+go_up_BM_vs_UC_ruv <- enrichGO(gene = up_genes_BM_vs_UC_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_ruv_BM_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_up_BM_vs_UC_ruv)) # 24
+
+down_genes_BM_vs_UC_ruv <- rownames(down_BM_vs_UC_ruv)
+go_down_BM_vs_UC_ruv <- enrichGO(gene = down_genes_BM_vs_UC_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_ruv_BM_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_down_BM_vs_UC_ruv)) # 5
+
+
+# FL vs BM
+up_genes_FL_vs_BM_ruv <- rownames(up_FL_vs_BM_ruv)
+go_up_FL_vs_BM_ruv <- enrichGO(gene = up_genes_FL_vs_BM_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_ruv_FL_vs_BM),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_up_FL_vs_BM_ruv)) # 34
+
+down_genes_FL_vs_BM_ruv <- rownames(down_FL_vs_BM_ruv)
+go_down_FL_vs_BM_ruv <- enrichGO(gene = down_genes_FL_vs_BM_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_ruv_FL_vs_BM),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_down_FL_vs_BM_ruv)) # 355
+
+
+# FL vs UC
+up_genes_FL_vs_UC_ruv <- rownames(up_FL_vs_UC_ruv)
+go_up_FL_vs_UC_ruv <- enrichGO(gene = up_genes_FL_vs_UC_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_ruv_FL_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_up_FL_vs_UC_ruv)) # 95
+
+down_genes_FL_vs_UC_ruv <- rownames(down_FL_vs_UC_ruv)
+go_down_FL_vs_UC_ruv <- enrichGO(gene = down_genes_FL_vs_UC_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_ruv_FL_vs_UC),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+View(data.frame(go_down_FL_vs_UC_ruv)) # 338
+```
+
+**Visualization**
+```{r}
+### Before RUV ###
+## BM vs UC
+png("UP_BM_vs_UC.png")
+barplot(go_up_BM_vs_UC, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("UP -  Adult BM vs Umbilical cord blood (before RUV)")
+dev.off()
+
+png("DOWN_BM_vs_UC.png")
+barplot(go_down_BM_vs_UC, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("DOWN -  Adult BM vs Umbilical cord blood (before RUV)")
+dev.off()
+
+## FL vs BM
+png("UP_FL_vs_BM.png")
+barplot(go_up_FL_vs_BM, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("UP -  Fetal liver vs Adult BM (before RUV)")
+dev.off()
+
+png("DOWN_FL_vs_BM.png")
+barplot(go_down_FL_vs_BM, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("DOWN -  Fetal liver vs Adult BM (before RUV)")
+dev.off()
+
+## FL vs UC
+png("UP_FL_vs_UC.png")
+barplot(go_up_FL_vs_UC, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("UP -  Fetal liver vs Umbilical cord blood (before RUV)")
+dev.off()
+
+png("DOWN_FL_vs_UC.png")
+barplot(go_down_FL_vs_UC, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("DOWN -  Fetal liver vs Umbilical cord blood (before RUV)")
+dev.off()
+```
+
+```{r}
+### After RUV ###
+## BM vs UC
+png("UP_BM_vs_UC_ruv.png")
+barplot(go_up_BM_vs_UC_ruv, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("UP -  Adult BM vs Umbilical cord blood (after RUV)")
+dev.off()
+
+png("DOWN_BM_vs_UC_ruv.png")
+barplot(go_down_BM_vs_UC_ruv, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("DOWN -  Adult BM vs Umbilical cord blood (after RUV)")
+dev.off()
+
+## FL vs BM
+png("UP_FL_vs_BM_ruv.png")
+barplot(go_up_FL_vs_BM_ruv, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("UP -  Fetal liver vs Adult BM (after RUV)")
+dev.off()
+
+png("DOWN_FL_vs_BM_ruv.png")
+barplot(go_down_FL_vs_BM_ruv, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("DOWN -  Fetal liver vs Adult BM (after RUV)")
+dev.off()
+
+## FL vs UC
+png("UP_FL_vs_UC_ruv.png")
+barplot(go_up_FL_vs_UC_ruv, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("UP -  Fetal liver vs Umbilical cord blood (after RUV)")
+dev.off()
+
+png("DOWN_FL_vs_UC_ruv.png")
+barplot(go_down_FL_vs_UC_ruv, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) +
+  ggtitle("DOWN -  Fetal liver vs Umbilical cord blood (after RUV)")
+dev.off()
+```
+
+
+
