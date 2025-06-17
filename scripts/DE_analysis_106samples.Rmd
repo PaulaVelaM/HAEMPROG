@@ -1,0 +1,1949 @@
+---
+title: "Differential Expression Analysis of HSC and progenitor cells"
+author: "Paula Vela Moreno"
+output: html_document
+date: "2025-05-05"
+---
+
+#############################################################
+#                                                           #
+#   Diferential expression analysis on 106 hematopoietic    #
+#   stem and progenitor cells to identify stable            #
+#   housekeeping genes.                                     #
+#   Data: From GEO accession number GSE233478               #
+#                                                           #
+#############################################################
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+*Load necessary libraries*
+```{r load_libraries, include=FALSE}
+# Load the necessary libraries
+library(DESeq2) 
+library(ggplot2) 
+library(tidyr)
+library(dplyr)
+library(pheatmap) 
+library(clusterProfiler)
+library(RUVSeq)
+library("org.Hs.eg.db", character.only = TRUE) # Load the genome wide annotation for Human
+library(ineq)
+library(ggrepel)
+library(VennDiagram)
+library(ggVennDiagram)
+library(patchwork)
+library(cowplot)
+```
+
+
+```{r set_directory, include = FALSE}
+# Set the working directory
+setwd("../Documents/BDBI/INTERNSHIP/")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+```{r load_the_data, eval=FALSE, warning=FALSE}
+# Load the data
+counts_106 <- read.csv("count_matrix106.csv", header = TRUE, row.names = 1, check.names = FALSE) 
+metadata <- read.csv("metadata_106.csv", header=TRUE, row.names = 1)
+
+# Rename the categories of "Donor ID" to just have the donor and not the ID
+metadata$Category <- as.character(metadata$Donor.ID)
+metadata$Category[metadata$Donor.ID %in% c("Fetus #11", "Fetus #10", "Fetus #12")] <- "Fetus"
+metadata$Category[metadata$Donor.ID %in% c("Newborn #04", "Newborn #05", "Newborn #06", "Newborn #11")] <- "Newborn"
+metadata$Category[metadata$Donor.ID %in% c("Adult #01", "Adult #02", "Adult #04")] <- "Adult"
+metadata$Category[metadata$Donor.ID %in% c("Embryo #06", "Embryo #10", "Embryo #11", "Embryo #12", "Embryo #13", "Embryo #14")] <- "Embryo"
+
+# convert columns Tissue, Cell.type, Donor.ID to factors
+metadata$Tissue <- as.factor(metadata$Tissue)
+metadata$Cell.type <- as.factor(metadata$Cell.type)
+metadata$Donor.ID <- as.factor(metadata$Donor.ID)
+metadata$Category <- factor(metadata$Category, levels = c("Fetus", "Newborn", "Adult", "Embryo"))
+
+View(counts_106)
+View(metadata)
+```
+
+```{r reordering_columns}
+# Reorder the columns of counts_106 to have the same order as the rows in metadata
+counts_106 <- counts_106[, rownames(metadata)]
+```
+
+
+```{r}
+table(metadata$Donor.ID)
+table(metadata$Category, metadata$Tissue)
+table(metadata$Donor.ID, metadata$Tissue)
+table(metadata$Cell.type, metadata$Category)
+```
+
+
+## 1. Construct the DESeqDataSet() object (just for initial visualization and calculation of statistics)
+```{r}
+dds_106 <- DESeqDataSetFromMatrix(countData = counts_106,
+                                  colData = metadata,
+                                  design = ~ 1) 
+```
+
+
+
+## 2. Transformation and initial PCA 
+**By tissue**
+```{r}
+vsd_pca_106 <- vst(dds_106, blind = TRUE) # 'blind = TRUE' >> without taking into account the design 
+
+pcaData_106 <- plotPCA(vsd_pca_106, intgroup = "Tissue", returnData = TRUE)
+percentage_variation_106 <- round(100 * attr(pcaData_106, "percentVar"))
+
+p1 <- ggplot(pcaData_106, aes(PC1, PC2, color = Tissue)) +
+  geom_point(size = 3) +
+  labs(title = "Initial PCA", 
+       x = paste0("PC1: ", percentage_variation_106[1], "%"),
+       y = paste0("PC2: ", percentage_variation_106[2], "%")) +
+  scale_color_manual(values = c("#3011F7", "#16ADEE", "#A23DED", "#348E4B", "#C7E825", "#F37A1B")) +
+  theme_minimal()
+
+ggsave("Initial_PCA.png", width = 10, height = 8)
+```
+
+**By tissue (with names)**
+```{r}
+pcaData_106$Sample <- rownames(pcaData_106)
+
+ggplot(pcaData_106, aes(PC1, PC2, color = Tissue)) +
+  geom_point(size = 3) +
+  geom_text_repel(aes(label = Sample), size = 3, max.overlaps = 20) + # add the samples names
+  labs(title = "Initial PCA", 
+       x = paste0("PC1: ", percentage_variation_106[1], "%"),
+       y = paste0("PC2: ", percentage_variation_106[2], "%")) +
+  scale_color_manual(values = c("#3011F7", "#16ADEE", "#A23DED", "#348E4B", "#C7E825", "#F37A1B")) +
+  theme_minimal()
+
+ggsave("Initial_PCA_names.png", width = 10, height = 8)
+```
+We found an outlier: GSM7502218
+Remove it due to contamination.
+
+
+
+## 3. Outlier removal and initial visualizations
+```{r outlier_removal_GSM7502218}
+# Remove the outlier from the count matrix
+counts_105 <- counts_106
+counts_105$GSM7502218 <- NULL # GSM7502218 is the outlier
+dim(counts_105)
+
+# Remove the outlier from the metadata
+metadata_removed <- metadata
+metadata_removed <- metadata_removed[rownames(metadata_removed) != "GSM7502218", ]
+dim(metadata_removed)
+
+
+dds_105 <- DESeqDataSetFromMatrix(countData = counts_105,
+                                          colData = metadata_removed,
+                                          design = ~ 1)
+```
+
+**Initial PCA without outlier**
+```{r}
+vsd_pca_105 <- vst(dds_105, blind = TRUE) # 'blind = TRUE' >> without taking into account the design 
+
+pcaData_105 <- plotPCA(vsd_pca_105, intgroup = "Tissue", returnData = TRUE)
+percentage_variation_105 <- round(100 * attr(pcaData_105, "percentVar"))
+
+p1 <- ggplot(pcaData_105, aes(PC1, PC2, color = Tissue)) +
+  geom_point(size = 3) +
+  labs(title = "Initial PCA", 
+       x = paste0("PC1: ", percentage_variation_105[1], "%"),
+       y = paste0("PC2: ", percentage_variation_105[2], "%")) +
+  scale_color_manual(values = c("#3011F7", "#16ADEE", "#A23DED", "#348E4B", "#CBC118", "#F37A1B")) +
+  theme_minimal()
+
+ggsave("Initial_PCA_cleaned.png", width = 10, height = 8)
+```
+
+**Tissue and developmental stage (Category)**
+```{r}
+vsd_pca_105 <- vst(dds_105, blind = TRUE) # 'blind = TRUE' >> without taking into account the design 
+
+pcaData_105 <- plotPCA(vsd_pca_105, intgroup = c("Tissue","Category"), returnData = TRUE)
+percentage_variation_105 <- round(100 * attr(pcaData_105, "percentVar"))
+
+colors_tissue <- c("#CBC118", "#16ADEE", "#3011F7", "#348E4B", "#CC6A0F", "#A23DED")
+
+p1_2 <- ggplot(pcaData_105, aes(PC1, PC2, color = Tissue, shape = Category)) +
+  geom_point(size = 3, stroke = 1) +
+  labs(x = paste0("PC1: ", percentage_variation_105[1], "%"),
+       y = paste0("PC2: ", percentage_variation_105[2], "%"),
+       shape = "Developmental stage") +
+  scale_color_manual(values = colors_tissue) +
+  scale_shape_manual(values = c("Embryo" = 3, "Fetus" = 2, "Newborn" = 16, "Adult" = 15)) +
+  theme_minimal()
+
+ggsave("PCA_Tissue_Category.png", width = 10, height = 8)
+```
+
+
+**By cell type and Tissue**
+```{r}
+vsd_pca_105 <- vst(dds_105, blind = TRUE) # 'blind = TRUE' >> without taking into account the design 
+pcaData_105_cell_type <- plotPCA(vsd_pca_105, intgroup = c("Tissue", "Cell.type"), returnData = TRUE)
+percentage_variation_105_cell_type <- round(100 * attr(pcaData_105_cell_type, "percentVar"))
+
+colors_cellType <- c("#1b9e77", "#e66101", "#c58df2", "#f468b3", "#C7E825", "#ffcc00", "#ED7AF5", "#66a61e", "#1f78b4", "#262122", "#777777", "#a6761d")
+
+p1_cell <- ggplot(pcaData_105_cell_type, aes(PC1, PC2, color = Cell.type, shape = Tissue)) +
+  geom_point(size = 3, stroke = 1) +
+  labs(x = paste0("PC1 Var: ", percentage_variation_105_cell_type[1], " % variance"),
+       y = paste0("PC2 Var: ", percentage_variation_105_cell_type[2], " % variance")) +
+  scale_color_manual(values = colors_cellType) +
+  scale_shape_manual(values = c(16, 17, 15, 3, 2, 8)) +
+  theme_minimal()
+
+ggsave("Initial_PCA_cell-tissue.png", width = 14, height = 8)
+```
+
+**PCA embryonic tissues**
+```{r}
+# Tissue
+vd_emb <- vsd_pca_105[, vsd_pca_105$Tissue %in% c("Aorta-gonad-mesonephros","Placenta", "Yolk Sac")]
+p2 <- plotPCA(vd_emb, intgroup="Tissue") + 
+  ggtitle("PCA embryonic tissues") + 
+  scale_color_manual(values = c("#16ADEE", "#348E4B", "#A23DED")) + 
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("PCA_embryonic.png", width = 10, height = 8)
+
+
+
+# Tissue + cell type
+pca_embryo <- plotPCA(vd_emb, intgroup = c("Tissue", "Cell.type"), returnData = TRUE)
+perc_emb <- round(100 * attr(pca_embryo, "percentVar"))
+
+p2_2 <- ggplot(pca_embryo, aes(PC1, PC2, color = Tissue, shape = Cell.type)) +
+  geom_point(size = 3, stroke = 1) +
+  labs(title = "PCA embryonic tissues",
+       x = paste0("PC1 Var: ", perc_emb[1], " % variance"),
+       y = paste0("PC2 Var: ", perc_emb[2], " % variance")) +
+  scale_color_manual(values = c("#16ADEE", "#348E4B", "#A23DED")) +
+  scale_shape_manual(values = c(15, 3, 2)) +
+  theme_minimal()
+
+ggsave("PCA_embryonic_celltype.png", width = 10, height = 8)
+```
+
+
+
+**PCA non-embryonic tissues**
+```{r}
+vd_no_emb <- vsd_pca_105[, vsd_pca_105$Tissue %in% c("Adult Bone Marrow","Fetal liver", "Umbillical Cord Blood")]
+p3 <- plotPCA(vd_no_emb, intgroup="Tissue") + 
+  ggtitle("PCA non-embryonic tissues") + 
+  scale_color_manual(values = c("#CBC118", "#3011F7", "#CC6A0F")) + 
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+
+ggsave("PCA_non-embryonic.png", width = 10, height = 8)
+
+
+
+# Tissue + cell type
+pca_no_embryo <- plotPCA(vd_no_emb, intgroup = c("Tissue", "Cell.type"), returnData = TRUE)
+perc_no_emb <- round(100 * attr(pca_no_embryo, "percentVar"))
+
+p3_2 <- ggplot(pca_no_embryo, aes(PC1, PC2, color = Tissue, shape = Cell.type)) +
+  geom_point(size = 3, stroke = 1) +
+  labs(title = "PCA non-embryonic tissues",
+       x = paste0("PC1 Var: ", perc_no_emb[1], " % variance"),
+       y = paste0("PC2 Var: ", perc_no_emb[2], " % variance")) +
+  scale_color_manual(values = c("#CBC118", "#3011F7", "#CC6A0F")) +
+  scale_shape_manual(values = c(2, 0, 1, 17, 7, 8, 3, 15, 16)) +
+  theme_minimal()
+
+ggsave("PCA_non-embryonic_celltype.png", width = 15, height = 8)
+```
+
+
+
+**Combine plots**
+```{r}
+combined_plot <- (p1_2) / (p2 | p3) + 
+  plot_layout(heights = c(1, 0.8))
+ggsave("Combined_PCA_plots_tissue_celltype.png", plot = combined_plot, width = 12, height = 10, dpi = 300)
+
+dev_tis_vs_cell_tis <- (p1_2 / p1_cell) +
+    plot_annotation(title = "Initial PCAs",
+                  theme = theme(plot.title = element_text(size = 12, face = "bold")),
+                  tag_levels = "A")
+ggsave("Combined_dev_tis-vs-cell_tis.png", plot = dev_tis_vs_cell_tis, width = 12, height = 10, dpi = 300)
+```
+
+
+
+## 4. Pre-filtering
+```{r pre_filtering}
+replicates <- table(metadata_removed$Tissue)
+minimum_replicates <- min(replicates)
+minimum_replicates
+
+#### PRE-FILTERING
+smallestGroupSize <- minimum_replicates
+keep_group <- rowSums(counts(dds_105) > 10) >= smallestGroupSize
+dds_105_filtered <- dds_105[keep_group,]
+dds_105_filtered
+```
+
+
+
+## 4. Normalized counts to calculate CV and Gini Index
+```{r}
+dds_105_filtered <- estimateSizeFactors(dds_105_filtered)
+expr_matrix_105 <- counts(dds_105_filtered, normalized = TRUE)
+saveRDS(expr_matrix_106, file = "expr_matrix_106_normalized.rds")
+```
+
+
+
+## 5. Calculate the coefficient of variation (CV)
+```{r calculate_cv}
+# Mean expression per gene
+expr_matrix_105 <- readRDS("expr_matrix_105_normalized.rds")
+gene_means_105 <- rowMeans(expr_matrix_105)
+
+# Dispersion of the data relative to the mean
+gene_stdev_105 <- apply(expr_matrix_105, 1, sd) 
+
+# Formula to calculate CV
+cv_values_105 <- gene_stdev_105/gene_means_105 
+```
+
+
+```{r density_plot_cv_selection, warning=FALSE}
+# Dataframe for ggplot
+df_cv_values_105 <- data.frame(Gene = names(cv_values_105), 
+                           CV = as.numeric(cv_values_105))
+
+# Take the 2nd percentile (lowest 2%)
+cv_threshold_105 <- quantile(df_cv_values_105$CV, probs = 0.02, na.rm = TRUE) 
+
+# Select candidate housekeeping genes
+genes_low_CV_105 <- cv_values_106[cv_values_105 < cv_threshold_105] # CV values below the threshold
+genes_low_CV_105_names <- names(genes_low_CV_105) # Extract their names
+length(genes_low_CV_105) # 519 genes
+
+
+# Compute the density of the CV values
+density_cv_105 <- density(df_cv_values_105$CV) # by dong this I obtain the minimum/maximum value, 1st/3rd quartile, mean, and media for x and y
+
+# Value of 'x' in which 'y' is maximum
+max_cv_105 <- density_cv_105$x[which.max(density_cv_105$y)] 
+
+
+
+# DENSITY PLOT
+ggplot(df_cv_values_105, aes(x = CV)) +
+  geom_density(fill = "#009E73", alpha=0.2) +
+  geom_vline(xintercept = max_cv_105, color = "#009E73", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = max_cv_105, y = 0.7), label = round(max_cv_105, 3), color = "#009E73", hjust = -0.3, vjust = 1) +
+  geom_vline(xintercept = cv_threshold_105, color = "#D55E00", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = cv_threshold_105, y = 0.7), label = round(cv_threshold_105, 3), color = "#D55E00", hjust = 1, vjust = 0) +
+  labs(title = "Density plot of CV values", x = "Coefficient of Variation", y = "Density") +
+  theme_minimal()
+
+ggsave("Density_plot_CV.png", width = 10, height = 8)
+```
+
+
+
+## 6. Calculate the Gini Index
+Measures how stable is the expression of a gene across different samples. Uses the Lorenz Curve, which compares the cumulative distribution of gene expression across samples. Genes with low Gini Index are considered more stable.
+```{r calculate_gini_index}
+# Create the Gini Index function
+gini_index <- function(expression_values){
+  if (sum(expression_values) == 0) return (NA)
+  
+  expression_values <- sort(expression_values)
+  n <- length(expression_values)
+  
+  cum_sum <- cumsum(expression_values)
+  
+  numerator <- sum((2*(1:n) - n - 1) * expression_values)
+  denominator <- n * sum(expression_values)
+  
+  gini <- numerator/denominator
+  
+  return(gini)
+}
+
+gini_scores_105 <- apply(expr_matrix_105, 1, gini_index) 
+```
+
+
+
+```{r density_plot_gini}
+gini_results_105 <- data.frame(Gene = names(gini_scores_105), 
+                           Gini_Index = gini_scores_105)
+
+gini_threshold_105 <- quantile(gini_results_105$Gini_Index, probs = 0.02, na.rm = TRUE) # 2%
+genes_low_gini_105 <- gini_results_105[gini_results_105$Gini_Index < gini_threshold_105, ]
+dim(genes_low_gini_105) # 519 x 2
+genes_low_gini_105_names <- genes_low_gini_105$Gene
+
+
+# compute the density of the gini values
+density_gini_105 <- density(gini_results_105$Gini_Index) 
+
+# value of x in which y is maximum
+m_gini_105 <- density_gini_105$x[which.max(density_gini_105$y)] 
+
+
+## DENSITY PLOT ##
+ggplot(gini_results_105, aes(x = Gini_Index)) +
+  geom_density(fill = "#009E73", alpha=0.2) +
+  theme_minimal() +
+  geom_vline(xintercept = m_gini_105, color = "#009E73", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = m_gini_105, y = 1.5), label = round(m_gini_105, 3), color = "#009E73", hjust = -0.3, vjust = -0.5) +
+  geom_vline(xintercept = gini_threshold_105, color = "#D55E00", linetype = "dashed", size = 0.5) +
+  geom_text(aes(x = gini_threshold_105, y = 1.5), label = round(gini_threshold_105, 3), color = "#D55E00", hjust = 1.3, vjust = 0) +
+  labs(title = "Density plot of Gini values", x = "Gini Index Values", y = "Density")
+
+ggsave("Density_plot_Gini.png", width = 10, height = 8)
+```
+
+
+
+**Lorenz Curve**
+```{r lorenz_curve}
+ginis_sort_105 <- sort(gini_results_105$Gini_Index)
+length(ginis_sort_105)
+
+low_ginis_105 <- ginis_sort_105[1:3] # the first three
+high_ginis_105 <- ginis_sort_105[25900:25902] # the last three
+
+low_ginis_105_name <- subset(gini_results_105, Gini_Index %in% low_ginis_105)
+high_ginis_105_name <- subset(gini_results_105, Gini_Index %in% high_ginis_105)
+
+genes_low_ginis_105 <- low_ginis_105_name$Gene
+genes_high_ginis_105 <- high_ginis_105_name$Gene
+
+png("Lorenz_curves_genes.png", width = 1200, height = 800)
+par(mfrow = c(2, 3), # 2 rows, 3 columns
+    oma = c(5, 4, 5, 4), # (bottom, left, top, right)
+    mgp = c(4, 1, 0), # (label, tick, line)
+    mar = c(7, 8, 6, 5))  # (bottom, left, top, right) (between plots of the same row)
+
+# Calculate and plot the Lorenz curve for the first 3 genes with the smallest value
+top <- for (i in genes_low_ginis_105) {
+  gene_expression_105 <- expr_matrix_105[i,]  # Obtain the expression of the i gene
+  lorenz_curve_105 <- Lc(gene_expression_105)  # Calculate the Lorenz curve
+  plot(lorenz_curve_105,
+   	main = paste("Gene", i),
+   	xlab = "Genes",
+   	ylab = "Expression",
+   	col = "#0072B2", lwd = 3, 
+   	cex.main = 2,
+   	cex.lab = 2,
+   	cex.axis = 2,
+   	family = "serif")
+  abline(0, 1, col = "black", lty = 2)  # Add the diagonal (perfect equality)
+}
+
+# Calculate and plot the Lorenz curve for the last 3 genes with the highest value
+down <- for (i in genes_high_ginis_105) {
+  gene_expression_105 <- expr_matrix_105[i,]  # Obtain the expression of the i gene
+  lorenz_curve_105 <- Lc(gene_expression_105)  # Calculate the Lorenz curve
+  plot(lorenz_curve_105,
+   	main = paste("Gene", i),
+   	xlab = "Genes", # Accumulative proportion of genes
+   	ylab = "Expression", # Accumulative proportion of expression
+   	col = "#0072B2", lwd = 3,
+   	cex.main = 2,
+   	cex.lab = 2,
+   	cex.axis = 2,
+   	family = "serif")
+  abline(0, 1, col = "black", lty = 2)  # Add the diagonal (perfect equality)
+}
+
+mtext("Lorenz curves for genes with top 3 low and high Gini Indices", outer = TRUE, cex = 2, line = 2, family = "serif") # cex is the size of the text
+dev.off()
+
+```
+
+
+
+## 7. Select candidate HKGs and check if literature HKGs are in the candidates
+```{r compare_lit_HKGs_candidates}
+### LITERATURE HKGs ###
+# B2M: ENSG00000166710
+# ACTB: ENSG00000075624 
+# GAPDH: ENSG00000111640
+# HPRT1: ENSG00000165704
+# HMBS: ENSG00000256269
+# PPIA: ENSG00000196262
+# SDHA: ENSG00000073578
+# YWHAZ: ENSG00000164924
+# TBP: ENSG00000112592
+# RPLP0: ENSG00000089157
+# UBC: ENSG00000150991
+# GUSB: ENSG00000169919
+# PGK1: ENSG00000102144
+# RPL13A: ENSG00000142541
+
+
+hkg_lit <- c("ENSG00000166710", "ENSG00000075624", "ENSG00000111640", "ENSG00000165704", "ENSG00000256269", "ENSG00000196262", "ENSG00000073578", "ENSG00000164924", "ENSG00000112592", "ENSG00000089157", "ENSG00000150991",  "ENSG00000169919", "ENSG00000102144", "ENSG00000142541")
+
+# Check if the typical HKGs in literature are among the 519 selected by CV
+intersect(genes_low_CV_105_names, hkg_lit) 
+
+# Check if the typical HKGs in literature are among the 519 selected by Gini Index
+intersect(genes_low_gini_105_names, hkg_lit) 
+
+```
+ENSG00000112592 appears in the CV list.
+ENSG00000112592 and ENSG00000196262 appear in the Gini Index list.
+
+
+
+**Extract CV and Gini of the literature HKGs**
+```{r}
+# Extract the CV values of the literature HKGs
+cv_literature_genes_105 <- cv_values_105[hkg_lit] 
+cv_literature_genes_105
+
+# Extract the Gini index values of the literature HKGs
+gini_literature_genes_105 <- gini_results_105[hkg_lit, ]
+gini_literature_genes_105
+```
+
+
+**Extract the expression of the literature HKGs**
+```{r}
+df_exp_hkg <- data.frame(Gen = hkg_lit,
+                         Media = sapply(hkg_lit, function(g) mean(as.numeric(counts_105[g, ]))),
+                         Min = sapply(hkg_lit, function(g) min(counts_105[g, ])),
+                         Max = sapply(hkg_lit, function(g) max(counts_105[g, ])))
+```
+
+
+
+**Extract the housekeeping genes selected in common: CV and Gini Index**
+```{r select_common_HKGs}
+# Common genes selected by both metrics
+common_CV_Gini_105 <- intersect(genes_low_CV_105_names, genes_low_gini_105_names)
+length(common_CV_Gini_105) # 433
+saveRDS(common_CV_Gini_105, file = "final_candidate_HKGs_105.rds")
+
+# Extract the expression of those candidate genes
+housekeeping_data_105 <- expr_matrix_105[common_CV_Gini_105, ]
+
+# Check if literature housekeeping genes in my candidates
+intersect(common_CV_Gini_105, hkg_lit) 
+```
+ENSG00000112592 is the unique common gene between the literature list and mine.
+
+**Extract the expression of my HKGs**
+```{r}
+df_exp_my_hkg <- data.frame(Gen = common_CV_Gini_105,
+                         Media = sapply(common_CV_Gini_105, function(g) mean(as.numeric(counts_105[g, ]))),
+                         Min = sapply(common_CV_Gini_105, function(g) min(counts_105[g, ])),
+                         Max = sapply(common_CV_Gini_105, function(g) max(counts_105[g, ])))
+```
+
+```{r}
+# Selected HKGs
+expr_values <- rowMeans(counts_105[common_CV_Gini_105, ])
+df <- data.frame(Expression = expr_values, Group = "Selected HKGs")
+
+exp_selected_HKGs <- ggplot(df, aes(x = Group, y = Expression)) +
+  geom_violin(fill = "#85eed0", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  scale_y_log10(limits = c(1, 1.4e6)) +
+  labs(x = "", y = "Expression media") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 11, color = "black"))
+
+# Literature HKGs
+expr_values_lit1 <- rowMeans(counts_105[hkg_lit, ])
+df_lit1 <- data.frame(Expression = expr_values_lit1, Group = "Literature HKGs")
+
+exp_lit_HKGs <- ggplot(df_lit1, aes(x = Group, y = Expression)) +
+  geom_violin(fill = "#eee885", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  scale_y_log10(limits = c(1, 1.4e6)) +
+  labs(x = "", y = "Expression media") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 11, color = "black"))
+
+# All genes
+df_all <- data.frame(Expression = rowMeans(counts_105), Group = "All genes")
+
+exp_all <- ggplot(df_all, aes(x = Group, y = Expression)) +
+  geom_violin(fill = "#85afee", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  scale_y_log10(limits = c(1, 1.4e6)) +
+  labs(title = "Expression", x = "", y = "Expression media") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 11, color = "black"))
+
+
+# Combine plot: expression of all genes, the literature ones, and mine
+combined_dexpressions <- (exp_all / exp_lit_HKGs / exp_selected_HKGs) +
+    plot_annotation(title = "Distribution of expression", 
+                  theme = theme(plot.title = element_text(size = 16, face = "bold")),
+                  tag_levels = "A")
+ggsave("Combined_expressions.png", width = 12, height = 14)
+```
+
+
+
+**Order the literature HKGs**
+```{r rank_lit_HKGs}
+df_hkg <- data.frame(Gene = hkg_lit,
+                     CV = as.numeric(cv_hkg_lit),
+                     Gini = as.numeric(gini_literature_genes_105$Gini_Index))
+
+# Calculate the ranking for each metric
+df_hkg$rank_CV <- rank(df_hkg$CV, ties.method = "min")
+df_hkg$rank_Gini <- rank(df_hkg$Gini, ties.method = "min")
+
+# Media of the ranking
+df_hkg$mean_rank <- rowMeans(df_hkg[, c("rank_CV", "rank_Gini")])
+
+# Select top 14 (all)
+all_hkg <- df_hkg[order(df_hkg$mean_rank), ][1:14, ]
+all_hkg
+```
+
+
+**Density plots CV values**
+```{r density_plots_CV_values}
+### All genes ###
+# Calculate statistics
+mean_all <- mean(df_cv_values_105$CV)
+median_all <- median(df_cv_values_105$CV)
+mode_all <- density(df_cv_values_105$CV)$x[which.max(density(df_cv_values_105$CV)$y)]
+
+# Prepare the dataframe
+df_lines_all <- data.frame(
+  Statistic = c("Mean", "Median", "Mode"),
+  Value = c(mean_all, median_all, mode_all)
+)
+
+df_lines_all$label <- round(df_lines_all$Value, 2)
+dens_all <- density(df_cv_values_105$CV)
+max_y_all <- max(dens_all$y)
+df_lines_all$y <- max_y_all * 0.9
+
+# Create the density plot for all the genes
+p1_all <- ggplot(df_cv_values_105, aes(x = CV)) +
+  geom_density(fill = "#85afee", alpha = 0.2) +
+  geom_vline(data = df_lines_all,
+             aes(xintercept = Value, color = Statistic),
+             linewidth = 0.8) +
+  scale_color_manual(values = c("Mean" = "#97201e",
+                                "Median" = "#1e5897",
+                                "Mode" = "#1e9782")) +
+  labs(title = "All genes",
+       x = "CV",
+       y = "Density",
+       color = "Statistic") +
+  scale_x_continuous(breaks = round(df_lines_all$Value, 2)) +
+  theme_minimal()
+ggsave("Density_plot_CV_all_genes.png", width = 10, height = 8)
+
+
+
+### Selected candidate HKGs ###
+# Calculate the CV of the selected candidate genes
+cv_candidates <- cv_values_105[common_CV_Gini_105]
+df_cv_candidates <- data.frame(CV = cv_candidates)
+
+# Calculate statistics
+mean_cand <- mean(cv_candidates)
+median_cand <- median(cv_candidates)
+mode_cand <- density(cv_candidates)$x[which.max(density(cv_candidates)$y)]
+
+df_lines_cand <- data.frame(Statistic = c("Mean", "Median", "Mode"),
+                           Value = c(mean_cand, median_cand, mode_cand))
+
+df_lines_cand$label <- round(df_lines_cand$Value, 2)
+dens_cand <- density(df_cv_candidates$CV)
+max_y_cand <- max(dens_cand$y)
+df_lines_cand$y <- max_y_cand * 0.9
+
+
+# Plot
+p2_candidate <- ggplot(df_cv_candidates, aes(x = CV)) +
+  geom_density(fill = "#85eed0", alpha = 0.2) +
+  geom_vline(data = df_lines_cand,
+             aes(xintercept = Value, color = Statistic),
+             linewidth = 0.8, show.legend = TRUE) +
+  scale_color_manual(values = c("Mean" = "#97201e",
+                                "Median" = "#1e5897",
+                                "Mode" = "#1e9782")) +
+  labs(title = "HKGs selected",
+       x = "CV",
+       y = "Density",
+       color = "Statistic") +
+  scale_x_continuous(breaks = round(df_lines_cand$Value, 2)) +
+  theme_minimal()
+ggsave("Density_plot_CV_candidate_genes.png", width = 10, height = 8)
+
+
+
+### Literature HKGs ###
+# Calculate the CVs for the literature HKGs
+cv_hkg_lit <- cv_values_105[hkg_lit]
+df_cv_hkg_lit <- data.frame(CV = cv_hkg_lit)
+
+# Calculate statistics
+mean_lit <- mean(cv_hkg_lit)
+median_lit <- median(cv_hkg_lit)
+mode_lit <- density(cv_hkg_lit)$x[which.max(density(cv_hkg_lit)$y)]
+
+df_lines_lit <- data.frame(
+  Statistic = c("Mean", "Median", "Mode"),
+  Value = c(mean_lit, median_lit, mode_lit)
+)
+
+df_lines_lit$label <- round(df_lines_lit$Value, 2)
+dens_lit <- density(cv_hkg_lit)
+max_y_lit <- max(dens_lit$y)
+df_lines_lit$y <- max_y_lit * 0.9
+
+# Density plot
+p3_lit <- ggplot(df_cv_hkg_lit, aes(x = CV)) +
+  geom_density(fill = "#eee885", alpha = 0.2) +
+  geom_vline(data = df_lines_lit,
+             aes(xintercept = Value, color = Statistic),
+             linewidth = 0.8) +
+  scale_color_manual(values = c("Mean" = "#97201e",
+                                "Median" = "#1e5897",
+                                "Mode" = "#1e9782")) +
+  labs(title = "HKGs literature", x = "CV", y = "Density") +
+  scale_x_continuous(breaks = round(df_lines_lit$Value, 2)) +
+  theme_minimal()
+ggsave("Density_plot_CV_literature_genes.png", width = 10, height = 8)
+
+
+# Combine the three density plots in a unique one
+combined_plot_CV <- p1_all / p2_candidate / p3_lit +
+  plot_annotation(title = "Coefficient of Variation Distributions", 
+                  theme = theme(plot.title = element_text(size = 16, face = "bold")),
+                  tag_levels = "A")
+ggsave("Combined_density_plots_CV.png", plot = combined_plot_CV, width = 12, height = 10)
+```
+
+
+```{r}
+### Create a dataframe containing the CV values of the different groups
+# Groups: all genes, literature HKGs, selected candidate HKGs
+df_combined_cv <- data.frame(CV = c(cv_values_105, cv_literature_genes_105, cv_candidates), Group = factor(c(rep("All genes", length(cv_values_105)), rep("HKGs literature", length(cv_literature_genes_105)), rep("HKGs selected", length(cv_candidates)))))
+
+# Density plot to compare the CV distribution across the groups
+ggplot(df_combined_cv, aes(x=CV, fill=Group, color=Group)) +
+  geom_density(alpha=0.4) +
+  theme_minimal() +
+  labs(x = "Coefficient of  Variation (CV)", y = "Density",
+       title = "CV comparison distributions") +
+  scale_fill_manual(values=c("#85afee", "#85eed0", "#eee885")) +
+  scale_color_manual(values=c("#85afee", "#85eed0", "#eee885"))
+ggsave("Density_plot_all_in_one.png", width = 10, height = 8)
+
+
+# Boxplot to visualize and compare the CV dispersion across the groups
+b_cv <- ggplot(df_combined_cv, aes(x=Group, y=CV, fill=Group)) +
+  geom_boxplot(alpha=0.6, outlier.size=0.7) +
+  annotate("text", x = 1.3, y = 2.4, label = "n = 25902", size = 2.9) +
+  annotate("text", x = 2.2, y = 1.1, label = "n = 14", size = 2.9) +
+  annotate("text", x = 3.2, y = 0.6, label = "n = 433", size = 2.9) +
+  theme_minimal() +
+  labs(title = "CV",
+       x = "", y = "Coefficient of  Variation (CV)") +
+  scale_fill_manual(values=c("#85afee", "#85eed0", "#eee885")) +
+  theme(legend.position = "none")
+```
+
+
+
+**Violin plots Gini Indices**
+```{r}
+range(gini_results_105$Gini_Index)
+
+# All genes
+g_violin_all <- ggplot(gini_results_105, aes(x = " ", y = Gini_Index)) +
+  geom_violin(fill = "#85afee", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "Gini Index", x = "Gini Index all genes", y = "Density") +
+  theme_minimal() + 
+  theme(plot.title = element_text(face = "bold"))
+
+
+# Candidate HKGs
+g_violin_cand <- ggplot(gini_candidates, aes(x = " ", y = Gini_Index)) +
+  geom_violin(fill = "#85eed0", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(x = "Gini Index selected HKGs", y = "Density") +
+  theme_minimal()
+
+
+# Literature HKGs
+g_violin_lit <- ggplot(gini_hkg, aes(x = " ", y = Gini_Index)) +
+  geom_violin(fill = "#eee885", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(x = "Gini Index literature HKGs", y = "Density") +
+  theme_minimal()
+```
+
+
+**Violin plots CV**
+```{r}
+# All genes
+cv_values_all <- data.frame(CV = cv_values_105)
+
+cv_violin_all <- ggplot(cv_values_all, aes(x = " ", y = CV)) +
+  geom_violin(fill = "#85afee", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  labs(title = "CV", x = "CV all genes", y = "Density") +
+  coord_cartesian(ylim = c(0, 3)) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"),
+        axis.text.x = element_text(size = 11))
+
+
+# Candidate HKGs
+cv_values_common_cand <- data.frame(CV = cv_values_common)
+
+cv_violin_cand <- ggplot(cv_values_common_cand, aes(x = " ", y = CV)) +
+  geom_violin(fill = "#85eed0", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  labs(x = "CV selected HKGs", y = "Density") +
+  coord_cartesian(ylim = c(0, 3)) +
+  theme_minimal()
+
+
+# Literature HKGs
+cv_hkg_lit_lit <- data.frame(CV = cv_hkg_lit)
+
+cv_violin_lit <- ggplot(cv_hkg_lit_lit, aes(x = " ", y = CV)) +
+  geom_violin(fill = "#eee885", alpha = 0.2) +
+  geom_boxplot(width = 0.1, color = "black", outlier.size = 0.5) +
+  labs(x = "CV literature HKGs", y = "Density") +
+  coord_cartesian(ylim = c(0, 3)) + 
+  theme_minimal()
+```
+
+
+**Combine expression, CV, Gini Index for all three groups**
+```{r plot_combined_violin_exp_cv_gini}
+# Combine expression plots
+c_exp <- exp_all + exp_lit_HKGs + exp_selected_HKGs
+
+# Combine CV plots
+c_cv <- cv_violin_all + cv_violin_lit + cv_violin_cand
+
+# Combine Gini Index plots
+c_gini <- g_violin_all + g_violin_lit + g_violin_cand
+
+# Create the combined figure
+c <- (c_exp / plot_spacer() / c_cv / plot_spacer() / c_gini) +   
+  plot_layout(heights = c(1, 0.1, 1, 0.1, 1)) +
+  plot_annotation(title = "Comparison of expression level, Coefficient of Variation, and Gini Index", theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)), tag_levels = "A")
+
+ggsave("Combined_exp_cv_gini.png", width = 12, height = 15)
+```
+
+
+
+```{r combined_gini_boxplot}
+## Create the dataframe containing the Gini values of the different groups
+df_combined_gini <- data.frame(Gini = c(gini_results_105$Gini_Index, gini_literature_genes_105$Gini_Index, gini_candidates$Gini_Index),
+                                    Group = factor(c(rep("All genes", length(gini_results_105$Gini_Index)),
+                                                     rep("HKGs literature", length(gini_literature_genes_105$Gini_Index)),
+                                                     rep("HKGs selected", length(gini_candidates$Gini_Index)))))
+
+
+b_gini <- ggplot(df_combined_gini, aes(x = Group, y = Gini, fill=Group)) +
+  geom_boxplot(alpha=0.6, outlier.size=0.7) +
+  annotate("text", x = 1.3, y = 0.8, label = "n = 25902", size = 2.9) +
+  annotate("text", x = 2.2, y = 0.4, label = "n = 14", size = 2.9) +
+  annotate("text", x = 3.2, y = 0.2, label = "n = 433", size = 2.9) +
+  theme_minimal() +
+  labs(title = "Gini Index",
+       x = "", y = "Gini Index") +
+  scale_fill_manual(values=c("#85afee", "#85eed0", "#eee885")) +
+  theme(legend.position = "none")
+
+
+combined_boxplots_cv_gini <- b_cv | b_gini
+ggsave("Combined_boxplots_cv_gini.png", width = 10, height = 6)
+```
+
+
+
+**Venn diagram CV and Gini Index**
+```{r}
+png("VennDiagram_candidate_HKGs.png")
+par(mar = c(5, 5, 5, 5)) # inferior, izquierda, superior, derecha
+draw.pairwise.venn(
+  area1 = length(genes_low_CV_105_names),
+  area2 = length(genes_low_gini_105_names),
+  cross.area = length(intersect(genes_low_CV_105_names, genes_low_gini_105_names)),
+  category = c("CV", "Gini"),
+  fill = c("#1AFF1A", "#4B0092"),
+  cex = 2,
+  cat.cex = 2.2
+)
+dev.off()
+```
+
+
+
+## 8. GO Enrichment Analysis of the candidate HKGs
+We performed ORA Enrichment Analysis using the final set of housekeeping genes selected by both methods (CV and Gini Index). This analysis identifies overrepresented Gene Ontology (GO) terms associated with biological processes (BP).
+
+By default:
+  pvalueCutoff = 0.05
+  qvalueCutoff = 0.2
+  
+```{r EA_candidate_hkg}
+housekeeping_genes <- common_CV_Gini_105
+all_expressed_genes <- rownames(expr_matrix_105)
+
+go_enrich_hkg_BP <- enrichGO(gene = housekeeping_genes,
+                      OrgDb = org.Hs.eg.db,
+                      keyType = 'ENSEMBL',
+                      ont = "BP",
+                      universe = all_expressed_genes,
+                      readable = TRUE, # convert gene IDs to gene symbols
+                      pvalueCutoff = 0.05, # the one by default
+                      qvalueCutoff = 0.2) # the one by default
+
+View(data.frame(go_enrich_hkg_BP))
+```
+
+**View the top 20**
+```{r}
+# Convertir a data frame
+go_enrich_hkg_BP_df <- as.data.frame(go_enrich_hkg_BP)
+
+# Ordenar por p-valor ajustado (de menor a mayor)
+go_enrich_hkg_BP_df_sorted <- go_enrich_hkg_BP_df[order(go_enrich_hkg_BP_df$p.adjust), ]
+
+# Extraer las top 20
+top20_go_terms <- head(go_enrich_hkg_BP_df_sorted, 20)
+
+# Ver el resultado
+View(top20_go_terms)
+
+```
+
+
+```{r visualization_EA_candidate_HKG}
+# For quick insights: BARPLOT
+#png("Barplot_top_BP.png", width = 1600, height = 1200, res = 300)
+png("Barplot_HKG.png", height = 20, width = 18, units = "cm", res = 300)
+barplot(go_enrich_hkg_BP, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 10)) +
+  ggtitle("Top Biological Processes")
+dev.off()
+
+# For gene term connections: CNET PLOT
+png("Cnetplot_HKG.png", width = 1600, height = 1200, res = 300)
+cnetplot(go_enrich_hkg_BP, showCategory = 12) + 
+  theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 10)) +
+  ggtitle("Cnetplot of top Biological Processes") 
+dev.off()
+```
+
+
+
+
+
+
+## 9. HSC vs Dendritic progenitors
+```{r}
+# 1. Extract the metadata
+cells_of_interest <- c("hematopoietic stem cells (CD34+lin-CD38-CD45RA-CD90+)",
+                       "common dendritic progenitors (CD34+lin-CD38+CD45RA+CD10-CD123hi)")
+metadata_hsc_dendritic <- metadata_removed[metadata_removed$Cell.type %in% cells_of_interest, ]
+
+# 2. Extract the counts
+selected_hsc_dendritic <- rownames(metadata_hsc_dendritic) # Extract the names of the selected samples
+counts_hsc_dendritic <- counts_105[, selected_hsc_dendritic] # Filter counts_106_removed by those columns
+dim(counts_hsc_dendritic) # 63103 x 16
+
+```
+
+**Construct the DESeqDataSet() object**
+```{r}
+dds_hsc_dendritic <- DESeqDataSetFromMatrix(countData = counts_hsc_dendritic,
+                                  colData = metadata_hsc_dendritic,
+                                  design = ~ Cell.type) 
+```
+
+**Pre-filtering**
+```{r}
+replicates_hsc_dendritic <- table(metadata_hsc_dendritic$Tissue)
+min_rep_HSC_dendritic <- min(replicates_hsc_dendritic)
+min_rep_HSC_dendritic
+
+#### PRE-FILTERING
+smallestGroupSize <- min_rep_HSC_dendritic
+keep_group <- rowSums(counts(dds_hsc_dendritic) > 10) >= smallestGroupSize
+dds_hsc_dendritic_filtered <- dds_hsc_dendritic[keep_group,]
+dds_hsc_dendritic_filtered
+```
+
+**Differential Expression Analysis**
+```{r run_deseq}
+# Execute DESeq to estimate dispersion and adjust the model
+dds_hsc_dendritic <- DESeq(dds_hsc_dendritic_filtered)
+
+res_hsc_dendritic <- resultsNames(dds_hsc_dendritic) 
+res_hsc_dendritic
+# There are 2 coefficients
+```
+
+**Comparison of interest**
+```{r}
+res_HSC_vs_dendritic <- results(dds_hsc_dendritic,
+                           contrast = c("Cell.type",
+                                        "hematopoietic stem cells (CD34+lin-CD38-CD45RA-CD90+)",
+                                        "common dendritic progenitors (CD34+lin-CD38+CD45RA+CD10-CD123hi)"),
+                           independentFiltering = FALSE)
+head(res_HSC_vs_dendritic, 3)
+summary(res_HSC_vs_dendritic)
+```
+
+**RUV correction**
+```{r ruvg_preparation}
+# Define control genes (the 430 HKGs selected)
+controls_105 <- readRDS("final_candidate_HKGs_105.rds")
+
+# Raw counts of the filtered genes
+counts_filtered_hsc_dendritic <- counts(dds_hsc_dendritic)
+
+# Metadata 
+pheno_hsc_dendritic <- as.data.frame(colData(dds_hsc_dendritic))
+
+# Check colnames and rownames are the same
+rownames(pheno_hsc_dendritic) == colnames(counts_filtered_hsc_dendritic)
+
+# Create the object from the count matrix
+seq_hsc_dendritic <- newSeqExpressionSet(counts = as.matrix(counts_filtered_hsc_dendritic),
+                           phenoData = pheno_hsc_dendritic)
+
+# Remove unwanted variation with the control genes
+# K is the number of unwanted variation factors to remove
+ruv_k1_hsc_dendritic <- RUVg(seq_hsc_dendritic, controls_105, k = 1)
+ruv_k2_hsc_dendritic <- RUVg(seq_hsc_dendritic, controls_105, k = 2)
+
+# Extract Ws and add them to the metadata
+metadata_w1_hsc_dendritic <- pData(ruv_k1_hsc_dendritic)
+metadata_w1_hsc_dendritic$W_1 <- pData(ruv_k1_hsc_dendritic)$W_1
+
+###### K2 just for check
+metadata_w2_hsc_dendritic <- pData(ruv_k2_hsc_dendritic)
+metadata_w2_hsc_dendritic$W_1 <- pData(ruv_k2_hsc_dendritic)$W_1
+metadata_w2_hsc_dendritic$W_2 <- pData(ruv_k2_hsc_dendritic)$W_2
+```
+
+
+**Comparison between DESeq2 and DESeq2 with RUV**
+```{r}
+png("plotRLE_hsc_dendritic.png")
+par(mfrow = c(1,3), las = 2, mar = c(7, 4, 4, 2))
+  
+plotRLE(seq_hsc_dendritic, outline=FALSE, ylim=c(-3, 3), main = "Before RUV") # Before RUV
+plotRLE(ruv_k1_hsc_dendritic, outline=FALSE, ylim=c(-3, 3), main = "RUV with k=1") # RUV with k=1
+plotRLE(ruv_k2_hsc_dendritic, outline=FALSE, ylim=c(-3, 3), main = "RUV with k=2") # RUV with k=2
+dev.off()
+```
+Choose K=1
+
+
+
+**PCA after RUV**
+```{r}
+# Check rownames and colnames are the same
+rownames(metadata_w1_hsc_dendritic) == colnames(ruv_k1_hsc_dendritic)
+
+dds_hsc_dendritic_ruv1 <- DESeqDataSetFromMatrix(countData = counts(ruv_k1_hsc_dendritic),
+                                  colData   = metadata_w1_hsc_dendritic,
+                                  design    = ~ W_1 + Cell.type)
+```
+
+
+**Differential Expression Analysis with RUV (k=1)**
+```{r}
+# Adjust the model with DESeq
+dds_ruv1_hsc_dendritic <- DESeq(dds_hsc_dendritic_ruv1)
+res_hsc_dendritic_ruv1 <- results(dds_ruv1_hsc_dendritic)
+
+# Extract the results
+res_HSC_vs_dendritic_ruv1 <- results(dds_ruv1_hsc_dendritic,
+                          contrast = c("Cell.type",
+                                        "hematopoietic stem cells (CD34+lin-CD38-CD45RA-CD90+)",
+                                        "common dendritic progenitors (CD34+lin-CD38+CD45RA+CD10-CD123hi)"),
+                           independentFiltering = FALSE)
+head(res_HSC_vs_dendritic_ruv1, 3)
+summary(res_HSC_vs_dendritic_ruv1)
+
+```
+
+**Selecting significant genes**
+```{r}
+### BEFORE RUV
+DE_genes <- res_HSC_vs_dendritic[which(res_HSC_vs_dendritic$padj < 0.05), ]
+up <- DE_genes[DE_genes$log2FoldChange > 1, ]
+down <- DE_genes[DE_genes$log2FoldChange < -1, ]
+```
+
+```{r}
+### AFTER RUV
+DE_genes_ruv <- res_HSC_vs_dendritic_ruv1[which(res_HSC_vs_dendritic_ruv1$padj < 0.05), ]
+up_ruv <- DE_genes_ruv[DE_genes_ruv$log2FoldChange > 1, ]
+down_ruv <- DE_genes_ruv[DE_genes_ruv$log2FoldChange < -1, ]
+```
+
+
+**Enrichment analysis**
+```{r}
+## UP before RUV
+up_genes <- rownames(up)
+
+go_up <- enrichGO(gene = up_genes,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_HSC_vs_dendritic),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+
+View(data.frame(go_up)) # 133 enriched terms
+
+## DOWN before RUV
+down_genes <- rownames(down)
+
+go_down <- enrichGO(gene = down_genes,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_HSC_vs_dendritic),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+
+View(data.frame(go_down)) # 640 enriched terms
+```
+
+```{r}
+## UP after RUV
+up_genes_ruv <- rownames(up_ruv)
+
+go_up_ruv <- enrichGO(gene = up_genes_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_HSC_vs_dendritic_ruv1),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+
+View(data.frame(go_up_ruv)) # 135 enriched terms
+
+## DOWN after RUV
+down_genes_ruv <- rownames(down_ruv)
+
+go_down_ruv <- enrichGO(gene = down_genes_ruv,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_HSC_vs_dendritic_ruv1),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2)
+
+View(data.frame(go_down_ruv)) # 650 enriched terms
+```
+
+```{r}
+### UP before RUV
+# For quick insights: BARPLOT
+png("Barplot_up.png", height = 20, width = 18, units = "cm", res = 300)
+up_before_ruv <- barplot(go_up, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("UP (before RUV)")
+dev.off()
+
+### DOWN before RUV
+# For quick insights: BARPLOT
+png("Barplot_down.png", height = 20, width = 18, units = "cm", res = 300)
+down_before_ruv <- barplot(go_down, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("DOWN (before RUV)")
+dev.off()
+
+
+### UP after RUV
+# For quick insights: BARPLOT
+png("Barplot_up_ruv.png", height = 20, width = 18, units = "cm", res = 300)
+up_after_ruv <- barplot(go_up_ruv, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("UP (after RUV)")
+dev.off()
+
+### DOWN after RUV
+# For quick insights: BARPLOT
+png("Barplot_down_ruv.png", height = 20, width = 18, units = "cm", res = 300)
+down_after_ruv <- barplot(go_down_ruv, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("DOWN (after RUV)")
+dev.off()
+
+
+# Combine all barplots (up, down, and ruv, no ruv) into a single figure
+combined_barplots_hsc_dendritic <- (up_before_ruv | up_after_ruv) / (down_before_ruv | down_after_ruv) +
+  plot_annotation(title = "Top enriched biological processes – HSC vs Dendritic progenitors", tag_levels = "A") &
+  theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+        plot.margin = margin(t = 20, r = 10, b = 10, l = 10))  # top, right, bottom, left
+ggsave("Combined_barplots_hsc_dendritic.png", width = 17, height = 16, dpi = 450)
+```
+
+
+**Check unique and common terms**
+```{r checking_common_unique_terms}
+## UP
+common_up <- intersect(go_up$Description, go_up_ruv$Description) # 87 common terms for up
+only_before_up <- setdiff(go_up$Description, go_up_ruv$Description) # 46 unique terms before applying correction in the up-regulated
+only_after_up <- setdiff(go_up_ruv$Description, go_up$Description) # 48 unique terms after applying correction in the down-regulated 
+
+## DOWN
+common_down <- intersect(go_down$Description, go_down_ruv$Description) # 575 common terms for down
+only_before_down <- setdiff(go_down$Description, go_down_ruv$Description) # 65 unique terms before applying correction in the down-regulated
+only_after_down <- setdiff(go_down_ruv$Description, go_down$Description) # 75 unique terms after applying correction in the down-regulated
+```
+
+**Extract the full object of the previously extracted terms**
+```{r}
+go_up_only_before <- go_up
+go_up_only_before@result <- filter(go_up@result, Description %in% only_before_up)
+
+go_up_only_after <- go_up_ruv
+go_up_only_after@result <- filter(go_up_ruv@result, Description %in% only_after_up)
+
+go_down_only_before <- go_down
+go_down_only_before@result <- filter(go_down@result, Description %in% only_before_down)
+
+go_down_only_after <- go_down_ruv
+go_down_only_after@result <- filter(go_down_ruv@result, Description %in% only_after_down)
+```
+
+
+**Visualization of the top enriched terms**
+```{r visualization_EA_up_down}
+### UP before RUV
+# For quick insights: BARPLOT
+png("Barplot_up_unique.png", height = 20, width = 18, units = "cm", res = 300)
+barplot(go_up_only_before, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 10)) + ggtitle("Top UP unique biological processes (before RUV)")
+dev.off()
+
+
+### DOWN before RUV
+# For quick insights: BARPLOT
+png("Barplot_down_unique.png", height = 20, width = 18, units = "cm", res = 300)
+barplot(go_down_only_before, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 10)) + ggtitle("Top DOWN unique biological processes (before RUV)")
+dev.off()
+
+
+### UP after RUV
+# For quick insights: BARPLOT
+png("Barplot_up_unique_ruv.png", height = 20, width = 18, units = "cm", res = 300)
+barplot(go_up_only_after, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 10)) + ggtitle("Top UP unique biological processes (after RUV)")
+dev.off()
+
+
+### DOWN after RUV
+# For quick insights: BARPLOT
+png("Barplot_down_unique_ruv.png", height = 20, width = 18, units = "cm", res = 300)
+barplot(go_down_only_after, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 10)) + ggtitle("Top DOWN unique biological processes (after RUV)")
+dev.off()
+
+```
+
+
+
+
+
+
+## 10. Hematopoietic progenitor vs Endothelium
+```{r}
+# 1. Extract the metadata
+cells_of_interest_2 <- c("endothelium (CD34+CD90+CD43-CD45-)",
+                       "hematopoietic progenitors (CD34+CD90- (CD43+CD45+))")
+metadata_hemato_endo <- metadata_removed[metadata_removed$Cell.type %in% cells_of_interest_2, ]
+
+# 2. Extract the counts
+selected_hemato_endo <- rownames(metadata_hemato_endo) # Extract the names of the selected samples
+counts_hemato_endo <- counts_106_removed[, selected_hemato_endo] # Filter counts_106_removed by those columns
+dim(counts_hemato_endo) # 63103 x 26
+
+```
+
+**Construct the DESeqDataSet() object**
+```{r}
+dds_hemato_endo <- DESeqDataSetFromMatrix(countData = counts_hemato_endo,
+                                  colData = metadata_hemato_endo,
+                                  design = ~ Cell.type) 
+```
+
+**Pre-filtering**
+```{r}
+replicates_hemato_endo <- table(metadata_hemato_endo$Tissue)
+min_rep_hemato_endo <- min(replicates_hemato_endo)
+min_rep_hemato_endo
+
+#### PRE-FILTERING
+smallestGroupSize <- min_rep_hemato_endo
+keep_group <- rowSums(counts(dds_hemato_endo) > 10) >= smallestGroupSize
+dds_hemato_endo_filtered <- dds_hemato_endo[keep_group,]
+dds_hemato_endo_filtered
+```
+
+**Differential Expression Analysis**
+```{r run_deseq}
+# Execute DESeq to estimate dispersion and adjust the model
+dds_hemato_endo <- DESeq(dds_hemato_endo_filtered)
+
+res_hemato_endo <- resultsNames(dds_hemato_endo) 
+res_hemato_endo
+```
+
+**Comparison of interest**
+```{r}
+res_hemato_vs_endo <- results(dds_hemato_endo,
+                           contrast = c("Cell.type", "hematopoietic progenitors (CD34+CD90- (CD43+CD45+))", "endothelium (CD34+CD90+CD43-CD45-)"),
+                           independentFiltering = FALSE)
+head(res_hemato_vs_endo, 3)
+summary(res_hemato_vs_endo)
+```
+
+**Remove Unwanted Variation**
+```{r remove_unwanted_variation}
+# Define control genes (the 430 HKGs selected)
+controls_106 <- common_CV_Gini_105
+
+# Raw counts of the filtered genes
+counts_filtered_hemato_endo <- counts(dds_hemato_endo)
+
+# Metadata 
+pheno_hemato_endo <- as.data.frame(colData(dds_hemato_endo))
+
+# Check colnames and rownames are the same
+rownames(pheno_hemato_endo) == colnames(counts_filtered_hemato_endo)
+
+# Create the object from the count matrix
+seq_hemato_endo <- newSeqExpressionSet(counts = as.matrix(counts_filtered_hemato_endo),
+                           phenoData = pheno_hemato_endo)
+
+# Remove unwanted variation with the control genes
+# K is the number of unwanted variation factors to remove
+ruv_k1_hemato_endo <- RUVg(seq_hemato_endo, controls_105, k = 1)
+ruv_k2_hemato_endo <- RUVg(seq_hemato_endo, controls_105, k = 2) # just to check
+
+# Extract Ws and add them to the metadata
+metadata_w1_hemato_endo <- pData(ruv_k1_hemato_endo)
+metadata_w1_hemato_endo$W_1 <- pData(ruv_k1_hemato_endo)$W_1
+
+###### K2 just for check
+metadata_w2_hemato_endo <- pData(ruv_k2_hemato_endo)
+metadata_w2_hemato_endo$W_1 <- pData(ruv_k2_hemato_endo)$W_1
+metadata_w2_hemato_endo$W_2 <- pData(ruv_k2_hemato_endo)$W_2
+```
+
+**Comparison between DESeq2 and DESeq2 with RUV**
+```{r}
+png("plotRLE_hemato_endo.png")
+par(mfrow = c(1,3), las = 2, mar = c(7, 4, 4, 2))
+  
+plotRLE(seq_hemato_endo, outline=FALSE, ylim=c(-3, 3), main = "Before RUV") # Before RUV
+plotRLE(ruv_k1_hemato_endo, outline=FALSE, ylim=c(-3, 3), main = "RUV with k=1") # RUV with k=1
+plotRLE(ruv_k2_hemato_endo, outline=FALSE, ylim=c(-3, 3), main = "RUV with k=2") # RUV with k=2
+dev.off()
+```
+Choose k= 1
+
+
+**PCA after RUV**
+```{r}
+# Check rownames and colnames are the same
+rownames(metadata_w1_hemato_endo) == colnames(ruv_k1_hemato_endo)
+
+dds_hemato_endo_ruv1 <- DESeqDataSetFromMatrix(countData = counts(ruv_k1_hemato_endo),
+                                  colData   = metadata_w1_hemato_endo,
+                                  design    = ~ W_1 + Cell.type)
+```
+
+
+**Differential Expression Analysis with RUV (k=1)**
+```{r}
+# Adjust the model with DESeq
+dds_ruv1_hemato_endo <- DESeq(dds_hemato_endo_ruv1)
+res_hemato_vs_endo_ruv1 <- results(dds_ruv1_hemato_endo)
+
+# Extract the results
+res_hemato_vs_endo_ruv1 <- results(dds_ruv1_hemato_endo,
+                           contrast = c("Cell.type",
+                                        "hematopoietic progenitors (CD34+CD90- (CD43+CD45+))",
+                                        "endothelium (CD34+CD90+CD43-CD45-)"),
+                           independentFiltering = FALSE)
+head(res_hemato_vs_endo_ruv1, 3)
+summary(res_hemato_vs_endo_ruv1)
+```
+
+**Selecting significant genes**
+```{r}
+### BEFORE RUV
+DE_genes_hemato_endo <- res_hemato_vs_endo[which(res_hemato_vs_endo$padj < 0.05), ]
+up_hemato_endo <- DE_genes_hemato_endo[DE_genes_hemato_endo$log2FoldChange > 1, ]
+down_hemato_endo <- DE_genes_hemato_endo[DE_genes_hemato_endo$log2FoldChange < -1, ]
+```
+
+```{r}
+### AFTER RUV
+DE_genes_hemato_endo_ruv <- res_hemato_vs_endo_ruv1[which(res_hemato_vs_endo_ruv1$padj < 0.05), ]
+up_hemato_endo_ruv <- DE_genes_hemato_endo_ruv[DE_genes_hemato_endo_ruv$log2FoldChange > 1, ]
+down_hemato_endo_ruv <- DE_genes_hemato_endo_ruv[DE_genes_hemato_endo_ruv$log2FoldChange < -1, ]
+```
+
+
+**Enrichment analysis**
+```{r}
+## UP before RUV
+up_genes_hemato_endo <- rownames(up_hemato_endo)
+
+go_up_hemato_endo <- enrichGO(gene = up_genes_hemato_endo,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_hemato_vs_endo),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2) 
+
+View(data.frame(go_up_hemato_endo)) # 1118 enriched terms
+
+## DOWN before RUV
+down_genes_hemato_endo <- rownames(down_hemato_endo)
+
+go_down_hemato_endo <- enrichGO(gene = down_genes_hemato_endo,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_hemato_vs_endo),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2) 
+
+View(data.frame(go_down_hemato_endo)) # 1328 enriched terms
+```
+
+```{r}
+## UP after RUV
+up_genes_ruv_hemato_endo <- rownames(up_hemato_endo_ruv)
+
+go_up_ruv_hemato_endo <- enrichGO(gene = up_genes_ruv_hemato_endo,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_hemato_vs_endo_ruv1),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2) 
+
+View(data.frame(go_up_ruv_hemato_endo)) # 1130 enriched terms
+
+## DOWN after RUV
+down_genes_ruv_hemato_endo <- rownames(down_hemato_endo_ruv)
+
+go_down_ruv_hemato_endo <- enrichGO(gene = down_genes_ruv_hemato_endo,
+                  OrgDb = org.Hs.eg.db,
+                  keyType = "ENSEMBL",
+                  ont = "BP",
+                  universe = rownames(res_hemato_vs_endo_ruv1),
+                  readable = TRUE,
+                  pvalueCutoff = 0.05,
+                  qvalueCutoff = 0.2) 
+
+View(data.frame(go_down_ruv_hemato_endo)) # 1263 enriched terms
+```
+
+
+**Visualization of the top enriched terms**
+```{r}
+png("Barplot_up.png")
+up_before_ruv_hemato_endo <- barplot(go_up_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("UP (before RUV)")
+dev.off()
+
+png("Barplot_down.png")
+down_before_ruv_hemato_endo <- barplot(go_down_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("DOWN (before RUV)")
+dev.off()
+
+png("Barplot_up_ruv.png")
+up_after_ruv_hemato_endo <- barplot(go_up_ruv_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("UP (after RUV)")
+dev.off()
+
+png("Barplot_down_ruv.png")
+down_after_ruv_hemato_endo <- barplot(go_down_ruv_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 11), plot.title = element_text(size = 4)) + ggtitle("DOWN (after RUV)")
+dev.off()
+
+
+# Combine the barplots into a single figure
+combined_barplots_hemato_endo <- (up_before_ruv_hemato_endo | up_after_ruv_hemato_endo) / (down_before_ruv_hemato_endo | down_after_ruv_hemato_endo) +
+  plot_annotation(title = "Top enriched biological processes – Hematopoietic progenitors vs Endothelium", tag_levels = "A") &
+  theme(plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+        plot.margin = margin(t = 20, r = 10, b = 10, l = 10))  # top, right, bottom, left
+ggsave("Combined_barplots_hemato_endo.png", width = 17, height = 16, dpi = 450)
+
+```
+
+**Checking unique and common enriched terms**
+```{r check_unique_common_enriched_terms}
+## UP
+common_up_hemato_endo <- intersect(go_up_hemato_endo$Description, go_up_ruv_hemato_endo$Description) # 1052 common enriched terms up-regulated
+only_before_up_hemato_endo <- setdiff(go_up_hemato_endo$Description, go_up_ruv_hemato_endo$Description) # 66 unique terms before applying correction in the up-regulated
+only_after_up_hemato_endo <- setdiff(go_up_ruv_hemato_endo$Description, go_up_hemato_endo$Description) # 78 unique terms after applying correction in the up-regulated
+
+## DOWN
+common_down_hemato_endo <- intersect(go_down_hemato_endo$Description, go_down_ruv_hemato_endo$Description) # 1193 common enriched terms down-regulated
+only_before_down_hemato_endo <- setdiff(go_down_hemato_endo$Description, go_down_ruv_hemato_endo$Description) # 135 unique terms before applying correction in the down-regulated
+only_after_down_hemato_endo <- setdiff(go_down_ruv_hemato_endo$Description, go_down_hemato_endo$Description) # 70 unique terms after applying correction in the down-regulated
+```
+
+**Extract the full object of the previously extracted terms**
+```{r}
+go_up_only_before_hemato_endo <- go_up_hemato_endo
+go_up_only_before_hemato_endo@result <- filter(go_up_hemato_endo@result, Description %in% only_before_up_hemato_endo)
+
+go_up_only_after_hemato_endo <- go_up_ruv_hemato_endo
+go_up_only_after_hemato_endo@result <- filter(go_up_ruv_hemato_endo@result, Description %in% only_after_up_hemato_endo)
+
+go_down_only_before_hemato_endo <- go_down_hemato_endo
+go_down_only_before_hemato_endo@result <- filter(go_down_hemato_endo@result, Description %in% only_before_down_hemato_endo)
+
+go_down_only_after_hemato_endo <- go_down_ruv_hemato_endo
+go_down_only_after_hemato_endo@result <- filter(go_down_ruv_hemato_endo@result, Description %in% only_after_down_hemato_endo)
+```
+
+**Visualizations of the terms**
+```{r go_barplots_up_down_unique}
+### UP before RUV
+# For quick insights: BARPLOT
+png("Barplot_up_unique.png")
+barplot(go_up_only_before_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) + ggtitle("Top UP unique biological processes (before RUV)")
+dev.off()
+
+
+### DOWN before RUV
+# For quick insights: BARPLOT
+png("Barplot_down_unique.png")
+barplot(go_down_only_before_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) + ggtitle("Top DOWN unique biological processes (before RUV)")
+dev.off()
+
+
+### UP after RUV
+# For quick insights: BARPLOT
+png("Barplot_up_ruv_unique.png")
+barplot(go_up_only_after_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) + ggtitle("Top UP unique biological processes (after RUV)")
+dev.off()
+
+
+### DOWN after RUV
+# For quick insights: BARPLOT
+png("Barplot_down_ruv_unique.png")
+barplot(go_down_only_after_hemato_endo, showCategory = 12) + theme(axis.text.y = element_text(angle = 0, hjust = 1, size = 7)) + ggtitle("Top DOWN unique biological processes (after RUV)")
+dev.off()
+```
+
+
+
+## 11. Differentially expressed genes before and after RUV correction
+
+**Comparison 1: Haematopoietic progenitors vs Endothelium**
+```{r}
+up_counts <- 2830
+up_counts_ruv <- 3018
+
+down_counts <- 6243
+down_counts_ruv <- 5907
+
+
+df <- data.frame(
+  Method = c("No RUV", "No RUV", "RUV", "RUV"),
+  Direction = c("Up", "Down", "Up", "Down"),
+  Count = c(up_counts, -down_counts, up_counts_ruv, -down_counts_ruv)
+)
+
+up_down_hemato_endo <- ggplot(df, aes(x = Method, y = Count, fill = Direction)) +
+  geom_col(width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_fill_manual(values = c("Up" = "#5DADE2", "Down" = "#E74C3C")) +
+  geom_text(aes(label = abs(Count), vjust = ifelse(Count > 0, -0.3, 1.3)), size = 4) +
+  ylab("Number of DE genes") +
+  xlab("") +
+  theme_minimal() +
+  ggtitle("Up and Down Regulated Genes (Hematopoietic progenitors vs Endothelium)") +
+  theme(axis.text.x = element_text(size = 12), plot.title = element_text(face = "bold"))
+
+```
+
+
+**Comparison 2: HSC vs Dendritic progenitors**
+```{r}
+up_counts <- 4039
+up_counts_ruv <- 6294
+
+down_counts <- 2415
+down_counts_ruv <- 2679
+
+df <- data.frame(
+  Method = c("No RUV", "No RUV", "RUV", "RUV"),
+  Direction = c("Up", "Down", "Up", "Down"),
+  Count = c(up_counts, -down_counts, up_counts_ruv, -down_counts_ruv)
+)
+
+up_down_hsc_dend <- ggplot(df, aes(x = Method, y = Count, fill = Direction)) +
+  geom_col(width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_fill_manual(values = c("Up" = "#5DADE2", "Down" = "#E74C3C")) +
+  geom_text(aes(label = abs(Count), vjust = ifelse(Count > 0, -0.3, 1.3)), size = 4) +
+  ylab("Number of DE genes") +
+  xlab("") +
+  theme_minimal() +
+  ggtitle("Up and Down Regulated Genes (HSC vs Dendritic progenitors)") +
+  theme(axis.text.x = element_text(size = 12), plot.title = element_text(face = "bold"))
+```
+
+```{r}
+combined_up_down <- up_down_hemato_endo / up_down_hsc_dend
+ggsave("Combined_hist_up_down.png", width = 12, height = 14)
+```
+
+
+
+**Hemato vs Endo**
+```{r}
+# Put together up and down for each condition
+relevant_genes_no_ruv <- union(rownames(up_hemato_endo), rownames(down_hemato_endo))
+relevant_genes_ruv <- union(rownames(up_hemato_endo_ruv), rownames(down_hemato_endo_ruv))
+
+venn1 <- venn.diagram(x = list(No_RUV = relevant_genes_no_ruv,
+                               RUV = relevant_genes_ruv),
+  #filename = "venn_hemato_vs_endo.png",
+  filename = NULL,
+  fill = c("#5DADE2", "#58D68D"),
+  alpha = 0.5,
+  cex = 1,
+  cat.cex = 1,
+  main = "Relevant DE genes Hematopoietic progenitors vs Endothelium\n(|log2FC| > 1 & padj < 0.05)")
+```
+
+
+**HSC vs Dendritic**
+```{r}
+# Put together up and down for each condition
+relevant_genes_no_ruv_hsc_Den <- union(rownames(up), rownames(down))
+relevant_genes_ruv_hsc_Den <- union(rownames(up_ruv), rownames(down_ruv))
+
+venn2 <- venn.diagram(x = list(No_RUV = relevant_genes_no_ruv_hsc_Den,
+                               RUV = relevant_genes_ruv_hsc_Den),
+  #filename = "venn_HSC_vs_dendritic.png",
+  filename = NULL,
+  fill = c("#5DADE2", "#58D68D"),
+  alpha = 0.5, # color transparency
+  cex = 1, # size of the numbers
+  cat.cex = 1, # size of the text
+  main = "Relevant DE genes HSC vs Dendritic progenitors\n(|log2FC| > 1 & padj < 0.05)")
+```
+
+```{r}
+blank_space <- textGrob(" ", gp = gpar(fontsize = 20))
+
+png("combined_venn_diagrams.png", width = 2000, height = 3000, res = 300)
+grid.arrange(
+  grobTree(venn1),
+  blank_space,
+  grobTree(venn2),
+  ncol = 1,
+  heights = c(1, 0.1, 1)
+)
+dev.off()
+```
+
+
+```{r}
+combined_up_down <- up_down_hemato_endo / up_down_hsc_dend
+
+# Convert the venn diagrams to plots with cowplot
+venn_plot1 <- ggdraw(grobTree(venn1))
+venn_plot2 <- ggdraw(grobTree(venn2))
+
+venn_combined <- venn_plot1 / plot_spacer() / venn_plot2 + plot_layout(heights = c(1, 0.1, 1)) # 0.1 is the space between the venn diagrams
+
+final_plot <- combined_up_down | venn_combined
+
+ggsave("final_histograms_venns.png", final_plot, width = 16, height = 12, dpi = 300)
+```
+
+
+12. Enriched terms
+**Hematopoietic progenitors vs Endothelium**
+```{r}
+# go_up_hemato_endo
+# go_up_ruv_hemato_endo
+up_terms <- 1118
+up_terms_ruv <- 1130
+
+# go_down_hemato_endo
+# go_down_ruv_hemato_endo
+down_terms <- 1328
+down_terms_ruv <- 1263
+
+
+df <- data.frame(
+  Method = c("No RUV", "No RUV", "RUV", "RUV"),
+  Direction = c("Up", "Down", "Up", "Down"),
+  Terms_enriched = c(up_terms, -down_terms, up_terms_ruv, -down_terms_ruv)
+)
+
+up_down_hemato_endo <- ggplot(df, aes(x = Method, y = Terms_enriched, fill = Direction)) +
+  geom_col(width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_fill_manual(values = c("Up" = "#5DADE2", "Down" = "#E74C3C")) +
+  geom_text(aes(label = abs(Terms_enriched), vjust = ifelse(Terms_enriched > 0, -0.3, 1.3)), size = 4) +
+  ylab("Number of Enriched Terms") +
+  xlab("") +
+  theme_minimal() +
+  ggtitle("Up and Down BP (Hematopoietic progenitors vs Endothelium)") +
+  theme(axis.text.x = element_text(size = 12), plot.title = element_text(face = "bold"))
+
+```
+
+**HSC vs Dendritic progenitors**
+```{r}
+# go_up
+# go_up_ruv
+up_terms <- 133
+up_terms_ruv <- 135
+
+# go_down
+# go_down_ruv
+down_terms <- 640
+down_terms_ruv <- 650
+
+df <- data.frame(
+  Method = c("No RUV", "No RUV", "RUV", "RUV"),
+  Direction = c("Up", "Down", "Up", "Down"),
+  Terms_enriched = c(up_terms, -down_terms, up_terms_ruv, -down_terms_ruv)
+)
+
+up_down_hsc_dend <- ggplot(df, aes(x = Method, y = Terms_enriched, fill = Direction)) +
+  geom_col(width = 0.5) +
+  geom_hline(yintercept = 0, color = "black") +
+  scale_fill_manual(values = c("Up" = "#5DADE2", "Down" = "#E74C3C")) +
+  geom_text(aes(label = abs(Terms_enriched), vjust = ifelse(Terms_enriched > 0, -0.3, 1.3)), size = 4) +
+  ylab("Number of Enriched Terms") +
+  xlab("") +
+  theme_minimal() +
+  ggtitle("Up and Down BP (HSC vs Dendritic progenitors)") +
+  theme(axis.text.x = element_text(size = 12), plot.title = element_text(face = "bold"))
+```
+
+```{r}
+combined_up_down <- up_down_hemato_endo / up_down_hsc_dend
+ggsave("Combined_hist_up_down_terms.png", width = 12, height = 14)
+```
+
+**Hemato vs Endo**
+```{r}
+# Put together up and down for each condition
+up_before_hemato_endo <- go_up_hemato_endo@result$ID[go_up_hemato_endo@result$p.adjust < 0.05]
+up_after_hemato_endo  <- go_up_ruv_hemato_endo@result$ID[go_up_ruv_hemato_endo@result$p.adjust < 0.05]
+
+down_before_hemato_endo <- go_down_hemato_endo@result$ID[go_down_hemato_endo@result$p.adjust < 0.05]
+down_after_hemato_endo  <- go_down_ruv_hemato_endo@result$ID[go_down_ruv_hemato_endo@result$p.adjust < 0.05]
+
+total_before_hemato_endo <- union(up_before_hemato_endo, down_before_hemato_endo)
+total_after_hemato_endo  <- union(up_after_hemato_endo, down_after_hemato_endo)
+
+
+venn1_terms <- venn.diagram(x = list(No_RUV = total_before_hemato_endo,
+                               RUV = total_after_hemato_endo),
+  #filename = "venn_hemato_vs_endo.png",
+  filename = NULL,
+  fill = c("#5DADE2", "#58D68D"),
+  alpha = 0.5,
+  cex = 1,
+  cat.cex = 1,
+  main = "Enriched terms Hematopoietic progenitors vs Endothelium\n(|log2FC| > 1 & padj < 0.05)")
+```
+
+
+**HSC vs Dendritic**
+```{r}
+# Put together up and down for each condition
+up_before <- go_up@result$ID[go_up@result$p.adjust < 0.05]
+up_after  <- go_up_ruv@result$ID[go_up_ruv@result$p.adjust < 0.05]
+
+down_before <- go_down@result$ID[go_down@result$p.adjust < 0.05]
+down_after  <- go_down_ruv@result$ID[go_down_ruv@result$p.adjust < 0.05]
+
+total_before <- union(up_before, down_before)
+total_after  <- union(up_after, down_after)
+
+
+venn2_terms <- venn.diagram(x = list(No_RUV = total_before,
+                               RUV = total_after),
+  #filename = "venn_HSC_vs_dendritic.png",
+  filename = NULL,
+  fill = c("#5DADE2", "#58D68D"),
+  alpha = 0.5, # color transparency
+  cex = 1, # size of the numbers
+  cat.cex = 1, # size of the text
+  main = "Enriched terms HSC vs Dendritic progenitors\n(|log2FC| > 1 & padj < 0.05)")
+```
+
+```{r}
+blank_space <- textGrob(" ", gp = gpar(fontsize = 20))
+
+png("combined_venn_diagrams_terms.png", width = 2000, height = 3000, res = 300)
+grid.arrange(
+  grobTree(venn1_terms),
+  blank_space,
+  grobTree(venn2_terms),
+  ncol = 1,
+  heights = c(1, 0.1, 1)
+)
+dev.off()
+```
+
+```{r}
+combined_up_down_terms <- up_down_hemato_endo / up_down_hsc_dend
+
+# Convert the venn diagrams to plots with cowplot
+venn_plot1_terms <- ggdraw(grobTree(venn1_terms))
+venn_plot2_terms <- ggdraw(grobTree(venn2_terms))
+
+venn_combined_terms <- venn_plot1_terms / plot_spacer() / venn_plot2_terms + plot_layout(heights = c(1, 0.1, 1)) # 0.1 is the space between the venn diagrams
+
+final_plot_terms <- combined_up_down_terms | venn_combined_terms
+
+ggsave("final_histograms_venns_terms.png", final_plot_terms, width = 16, height = 12, dpi = 300)
+```
+
+
+
+
+12. Density distributions of CV and Gini Index highlighting literature HKGs
+**Density curve of CV values with lit HKGs marked**
+```{r}
+df_cv_all <- cv_values_all
+
+# Create a dataframe with the CV values of the literature HKGs
+df_cv_lit <- data.frame(CV = cv_hkg_lit_lit, Gene = rownames(cv_hkg_lit_lit))
+
+# Convert the IDs of the genes to a gene name
+ensembl_ids <- df_cv_lit$Gene
+gene_symbols <- mapIds(org.Hs.eg.db,
+                       keys = ensembl_ids,
+                       column = "SYMBOL",
+                       keytype = "ENSEMBL",
+                       multiVals = "first")
+df_cv_lit$Gene <- gene_symbols
+
+# Filter the dataframe to only have information about TBP
+df_tbp <- df_cv_lit[df_cv_lit$Gene == "TBP", ]
+
+# Density plot of all genes adding lines where the literature HKGs are located
+density_cv <- ggplot(df_cv_all, aes(x = CV)) +
+  geom_density(fill = "#b5d3e7", alpha = 0.5, color = "black") +
+  geom_vline(data = df_cv_lit, aes(xintercept = CV, color = Gene == "TBP"), 
+             linetype = "dashed", size = 0.9) +
+  scale_color_manual(values = c("FALSE" = "#e74c3c", "TRUE" = "#1abc9c"), 
+                     labels = c("Other HKGs", "TBP")) +
+  geom_text(data = df_tbp, aes(x = CV, y = max(density(df_cv_all$CV)$y) + 0.02, label = Gene),
+            angle = 45, hjust = 1, size = 3.2, color = "#1abc9c") +
+  geom_vline(xintercept = cv_threshold_106, color = "black", linetype = "dashed", size = 1) +
+  geom_text(aes(x = cv_threshold_106, y = max(density(df_cv_all$CV)$y) - 0.02), label = round(cv_threshold_106, 3), color = "black", hjust = 1, vjust = 0, angle = 45, size = 3.2) +
+  labs(title = "Distribution of CV values across all genes",
+       x = "Coefficient of Variation (CV)",
+       y = "Density",
+       color = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 10),
+        legend.position = "top") +
+  guides(color = "none")
+
+```
+
+
+
+**Density curve of Gini Index values with lit HKGs marked**
+```{r}
+## Exactly the same as before but now for the Gini Index instead of the CV
+
+df_gini_all <- gini_results_106
+df_gini_lit <- gini_literature_genes_106
+
+ensembl_ids <- df_gini_lit$Gene
+gene_symbols <- mapIds(org.Hs.eg.db,
+                       keys = ensembl_ids,
+                       column = "SYMBOL",
+                       keytype = "ENSEMBL",
+                       multiVals = "first")
+df_gini_lit$Gene <- gene_symbols
+
+genes_interest <- c("TBP", "PPIA")
+df_labels <- df_gini_lit[df_gini_lit$Gene %in% genes_interest, ]
+
+max_y_gini <- max(density(df_gini_all$Gini_Index)$y)
+
+density_gini <- ggplot(df_gini_all, aes(x = Gini_Index)) +
+  geom_density(fill = "#b5d3e7", alpha = 0.5, color = "black") +
+  geom_vline(data = df_gini_lit, aes(xintercept = Gini_Index), 
+             linetype = "dashed", color = "#e74c3c", size = 0.9) +
+  geom_vline(data = df_labels, aes(xintercept = Gini_Index), linetype = "dashed", size = 0.9, color = "#1abc9c") +
+  geom_text(data = df_labels, aes(x = Gini_Index, y = max_y_gini + 0.02, label = Gene),
+            angle = 45, hjust = 1, size = 3.2, color = "#1abc9c") +
+  geom_vline(xintercept = gini_threshold_106, color = "black", linetype = "dashed", size = 1) +
+  geom_text(aes(x = gini_threshold_106, y = max_y_gini - 0.07), 
+            label = round(gini_threshold_106, 3), color = "black", 
+            hjust = 1, vjust = 0, angle = 45, size = 3.2) +
+  labs(title = "Distribution of Gini Index values across all genes",
+       x = "Gini Index",
+       y = "Density",
+       color = NULL) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 14, face = "bold"),
+        plot.subtitle = element_text(size = 10),
+        legend.position = "top")
+
+```
+
+
+```{r}
+combined_densities <- density_cv / density_gini
+ggsave("Combined_densities.png", width = 14, height = 10)
+```
+
+
+
+
