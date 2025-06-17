@@ -36,7 +36,7 @@ library("org.Hs.eg.db", character.only = TRUE) # Genome wide annotation for Huma
 
 ```{r set_directory, include = FALSE}
 # Set the working directory
-setwd("../Documents/BDBI/INTERNSHIP/")
+# setwd("...") change 
 ```
 
 ```{r}
